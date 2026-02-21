@@ -1,27 +1,61 @@
 """
-ReSee - Stereo Camera Viewer
+ReSee - Stereo Camera Viewer with Depth Estimation
 
-Simple stereo camera viewer at 10fps.
+Stereo camera viewer with optional depth mapping.
 Compatible with macOS, Linux, and Raspberry Pi.
 """
 
+import argparse
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+
+import numpy as np
+import cv2
 
 from src.config.settings import get_settings
 from src.utils.logger import setup_logger, get_logger
 from src.utils.timing import FPSController, FrameTimer
 from src.camera.stereo_capture import StereoCamera, StereoCameraError
 from src.camera.display import VideoDisplay
+from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="ReSee - Stereo Camera Viewer with Depth Estimation"
+    )
+    parser.add_argument(
+        '--recalibrate',
+        action='store_true',
+        help='Force recalibration even if calibration file exists'
+    )
+    parser.add_argument(
+        '--no-depth',
+        action='store_true',
+        help='Disable depth estimation (stereo view only)'
+    )
+    return parser.parse_args()
 
 
 class ReSeeApp:
-    """Simple stereo camera viewer application."""
+    """Stereo camera viewer application with depth estimation."""
 
-    def __init__(self):
-        """Initialize ReSee camera viewer."""
+    def __init__(self, recalibrate: bool = False, no_depth: bool = False):
+        """
+        Initialize ReSee camera viewer.
+
+        Args:
+            recalibrate: Force recalibration even if data exists.
+            no_depth: Disable depth estimation.
+        """
+        # CLI options
+        self.recalibrate = recalibrate
+        self.no_depth = no_depth
+
         # Load configuration
         self.settings = get_settings()
 
@@ -39,6 +73,8 @@ class ReSeeApp:
         # Components
         self.camera: Optional[StereoCamera] = None
         self.display: Optional[VideoDisplay] = None
+        self.depth_estimator: Optional[DepthEstimator] = None
+        self.calibrator: Optional[StereoCalibrator] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -46,6 +82,7 @@ class ReSeeApp:
 
         # Control flags
         self.running = False
+        self.depth_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -58,7 +95,7 @@ class ReSeeApp:
 
     def initialize(self) -> bool:
         """
-        Initialize camera and display.
+        Initialize camera, display, and depth estimation.
 
         Returns:
             True if successful, False otherwise.
@@ -100,6 +137,15 @@ class ReSeeApp:
             self.fps_controller = FPSController(self.settings.camera.fps)
             self.frame_timer = FrameTimer(window_size=30)
 
+            # Initialize depth estimation if enabled
+            if self.settings.depth.enabled and not self.no_depth:
+                if not self._initialize_depth():
+                    self.logger.warning("Depth estimation disabled due to initialization failure")
+            elif self.no_depth:
+                self.logger.info("Depth estimation disabled by --no-depth flag")
+            else:
+                self.logger.info("Depth estimation disabled in config")
+
             self.logger.info("All components initialized successfully")
             return True
 
@@ -111,11 +157,89 @@ class ReSeeApp:
             self.logger.error(f"Initialization failed: {e}")
             return False
 
+    def _initialize_depth(self) -> bool:
+        """
+        Initialize depth estimation with calibration.
+
+        Returns:
+            True if depth estimation is ready, False otherwise.
+        """
+        depth_cfg = self.settings.depth
+        calib_path = depth_cfg.calibration_file
+        current_res = (
+            self.settings.camera.resolution.width,
+            self.settings.camera.resolution.height
+        )
+
+        self.calibrator = StereoCalibrator()
+
+        # Check if we need to calibrate
+        need_calibration = self.recalibrate or not self.calibrator.is_valid(
+            calib_path, current_res
+        )
+
+        if need_calibration:
+            self.logger.info("Starting stereo camera calibration...")
+
+            if not self.display or not self.display.is_available():
+                self.logger.error("Display required for calibration")
+                return False
+
+            # Capture calibration frames
+            frames = self.calibrator.capture_calibration_frames(
+                self.camera,
+                num_frames=15
+            )
+
+            if not frames:
+                self.logger.error("Calibration cancelled or failed")
+                return False
+
+            # Perform calibration
+            if not self.calibrator.calibrate(frames):
+                self.logger.error("Stereo calibration failed")
+                return False
+
+            # Save calibration
+            if not self.calibrator.save(calib_path):
+                self.logger.error("Failed to save calibration")
+                return False
+
+            self.logger.info("Calibration complete and saved")
+        else:
+            # Load existing calibration
+            if not self.calibrator.load(calib_path):
+                self.logger.error("Failed to load calibration")
+                return False
+            self.logger.info("Loaded existing calibration data")
+
+        # Create depth estimator
+        try:
+            self.depth_estimator = DepthEstimator(
+                calibration_data=self.calibrator.get_calibration_data(),
+                baseline_mm=depth_cfg.baseline_mm,
+                num_disparities=depth_cfg.num_disparities,
+                block_size=depth_cfg.block_size,
+                min_depth_m=depth_cfg.min_depth_m,
+                max_depth_m=depth_cfg.max_depth_m
+            )
+            self.depth_enabled = True
+            self.logger.info("Depth estimation enabled")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to create depth estimator: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
         self.logger.info(f"Target FPS: {self.settings.camera.fps}")
         self.logger.info(f"Resolution: {self.settings.camera.resolution.width}x{self.settings.camera.resolution.height} per camera")
+        if self.depth_enabled:
+            self.logger.info("Depth estimation: ENABLED")
+        else:
+            self.logger.info("Depth estimation: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         self.logger.info("-" * 60)
 
@@ -144,10 +268,6 @@ class ReSeeApp:
 
                 # Display video if available
                 if self.display and self.display.is_available():
-                    # Resize and combine frames for display
-                    import numpy as np
-                    import cv2
-
                     target_w = self.settings.camera.resolution.width
                     target_h = self.settings.camera.resolution.height
 
@@ -162,12 +282,37 @@ class ReSeeApp:
                     else:
                         right_resized = right_frame
 
-                    # Combine side-by-side
-                    combined_frame = np.hstack((left_resized, right_resized))
+                    # Combine side-by-side for stereo view
+                    stereo_combined = np.hstack((left_resized, right_resized))
+
+                    # Process depth if enabled
+                    if self.depth_enabled and self.depth_estimator:
+                        depth_colored, _ = self.depth_estimator.process_frame(
+                            left_resized, right_resized, include_legend=True
+                        )
+
+                        # Resize depth to match stereo width
+                        stereo_width = stereo_combined.shape[1]
+                        depth_height = depth_colored.shape[0]
+                        depth_width = depth_colored.shape[1]
+
+                        # Scale depth to match stereo width while preserving aspect ratio
+                        scale_factor = stereo_width / depth_width
+                        new_depth_height = int(depth_height * scale_factor)
+                        depth_resized = cv2.resize(
+                            depth_colored,
+                            (stereo_width, new_depth_height)
+                        )
+
+                        # Stack stereo on top, depth below
+                        combined_frame = np.vstack((stereo_combined, depth_resized))
+                    else:
+                        combined_frame = stereo_combined
 
                     # Create status
                     elapsed = time.time() - start_time
-                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s"
+                    depth_status = " | Depth: ON" if self.depth_enabled else ""
+                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}"
 
                     self.display.show_frame(
                         combined_frame,
@@ -259,7 +404,11 @@ def main() -> int:
     Returns:
         Exit code.
     """
-    app = ReSeeApp()
+    args = parse_args()
+    app = ReSeeApp(
+        recalibrate=args.recalibrate,
+        no_depth=args.no_depth
+    )
     return app.run()
 
 

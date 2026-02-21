@@ -78,6 +78,31 @@ class DisplayConfig(BaseModel):
     scale: float = Field(default=0.5, ge=0.1, le=2.0)
 
 
+class DepthConfig(BaseModel):
+    """Depth estimation configuration."""
+    enabled: bool = Field(default=True)
+    baseline_mm: float = Field(default=60.0, ge=10.0, le=500.0)
+    calibration_file: str = Field(default="config/calibration/stereo_calib.npz")
+    num_disparities: int = Field(default=64, ge=16, le=256)
+    block_size: int = Field(default=9, ge=3, le=21)
+    min_depth_m: float = Field(default=0.3, ge=0.1, le=2.0)
+    max_depth_m: float = Field(default=5.0, ge=1.0, le=20.0)
+
+    @validator('num_disparities')
+    def validate_num_disparities(cls, v):
+        """Ensure num_disparities is divisible by 16."""
+        if v % 16 != 0:
+            raise ValueError("num_disparities must be divisible by 16")
+        return v
+
+    @validator('block_size')
+    def validate_block_size(cls, v):
+        """Ensure block_size is odd."""
+        if v % 2 == 0:
+            raise ValueError("block_size must be odd")
+        return v
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
     level: str = Field(default="INFO")
@@ -101,6 +126,7 @@ class Settings(BaseModel):
     gemini: Optional[GeminiConfig] = None  # Optional - Gemini support disabled
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    depth: DepthConfig = Field(default_factory=DepthConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Settings":

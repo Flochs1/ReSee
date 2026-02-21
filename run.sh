@@ -44,7 +44,7 @@ fi
 # Run the application
 echo -e "${GREEN}Starting ReSee...${NC}"
 echo ""
-python -m src.main
+python -m src.main "$@"
 
 # Deactivate virtual environment on exit
 deactivate

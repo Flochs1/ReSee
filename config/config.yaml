@@ -66,3 +66,23 @@ logging:
 
   # Log format string
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+depth:
+  # Enable depth estimation
+  enabled: true
+
+  # Stereo camera baseline in millimeters
+  baseline_mm: 60.0
+
+  # Path to calibration file (created automatically on first run)
+  calibration_file: "config/calibration/stereo_calib.npz"
+
+  # Number of disparities for stereo matching (must be divisible by 16)
+  num_disparities: 64
+
+  # Block size for stereo matching (must be odd, 5-15 typical)
+  block_size: 9
+
+  # Depth range for colorization (in meters)
+  min_depth_m: 0.3
+  max_depth_m: 5.0

@@ -188,7 +188,9 @@ echo ""
 echo -e "${GREEN}Step 5: Starting ReSee...${NC}"
 echo "========================================"
 echo ""
-python -m src.main
+echo "CLI options: --recalibrate (force calibration), --no-depth (disable depth)"
+echo ""
+python -m src.main "$@"
 
 # Deactivate virtual environment on exit
 deactivate
