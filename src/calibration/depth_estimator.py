@@ -17,7 +17,7 @@ class DepthEstimator:
         baseline_mm: float = 60.0,
         num_disparities: int = 64,
         block_size: int = 9,
-        min_depth_m: float = 0.3,
+        min_depth_m: float = 1.0,
         max_depth_m: float = 5.0
     ):
         """
@@ -28,8 +28,9 @@ class DepthEstimator:
             baseline_mm: Distance between camera centers in mm.
             num_disparities: Number of disparities for stereo matching.
             block_size: Block size for stereo matching (must be odd).
-            min_depth_m: Minimum depth for colorization (meters).
-            max_depth_m: Maximum depth for colorization (meters).
+            min_depth_m: Minimum depth for colorization (meters). Anything
+                         closer is shown as red.
+            max_depth_m: Maximum depth for colorization (meters). Shown as blue.
         """
         self.rectify_map_left = calibration_data['rectify_map_left']
         self.rectify_map_right = calibration_data['rectify_map_right']
@@ -212,9 +213,10 @@ class DepthEstimator:
 
     def colorize_depth(self, depth: np.ndarray) -> np.ndarray:
         """
-        Apply RYGB colormap to depth map.
+        Apply RYGB colormap to depth map (linear).
 
-        Red = near (min_depth), Blue = far (max_depth).
+        Red = near (min_depth or closer), Blue = far (max_depth).
+        Linear interpolation between min and max depth.
 
         Args:
             depth: Depth map in meters.
@@ -222,7 +224,7 @@ class DepthEstimator:
         Returns:
             Colorized depth image (BGR).
         """
-        # Normalize depth to 0-255 range
+        # Linear normalization: anything <= min_depth is 0 (red), max_depth is 1 (blue)
         normalized = np.clip(
             (depth - self.min_depth) / (self.max_depth - self.min_depth),
             0, 1
@@ -269,18 +271,18 @@ class DepthEstimator:
         legend = np.zeros((height, width, 3), dtype=np.uint8)
         legend[:, :width - 30] = legend_bar
 
-        # Add depth labels
+        # Add depth labels (linear scale)
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.35
         color = (255, 255, 255)
         thickness = 1
 
-        # Label positions
+        depth_range = self.max_depth - self.min_depth
         labels = [
             (0, f"{self.min_depth:.1f}m"),
-            (height // 4, f"{self.min_depth + (self.max_depth - self.min_depth) * 0.25:.1f}m"),
-            (height // 2, f"{(self.min_depth + self.max_depth) / 2:.1f}m"),
-            (3 * height // 4, f"{self.min_depth + (self.max_depth - self.min_depth) * 0.75:.1f}m"),
+            (height // 4, f"{self.min_depth + depth_range * 0.25:.1f}m"),
+            (height // 2, f"{self.min_depth + depth_range * 0.5:.1f}m"),
+            (3 * height // 4, f"{self.min_depth + depth_range * 0.75:.1f}m"),
             (height - 15, f"{self.max_depth:.1f}m")
         ]
 

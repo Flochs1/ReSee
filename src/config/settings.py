@@ -85,7 +85,7 @@ class DepthConfig(BaseModel):
     calibration_file: str = Field(default="config/calibration/stereo_calib.npz")
     num_disparities: int = Field(default=64, ge=16, le=256)
     block_size: int = Field(default=9, ge=3, le=21)
-    min_depth_m: float = Field(default=0.3, ge=0.1, le=2.0)
+    min_depth_m: float = Field(default=1.0, ge=0.1, le=5.0)
     max_depth_m: float = Field(default=5.0, ge=1.0, le=20.0)
 
     @validator('num_disparities')
