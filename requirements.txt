@@ -1,16 +1,14 @@
-# Core dependencies for stereo camera viewer
-opencv-contrib-python>=4.9.0  # contrib version required for WLS disparity filter
+# Core dependencies
+opencv-contrib-python>=4.9.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
 pyyaml>=6.0.1
-
-# Configuration and utilities
 pydantic>=2.6.0
 colorama>=0.4.6
 
-# Optional: Audio support (not currently used)
-# pyaudio>=0.2.14
+# Object detection (CoreML - no PyTorch required at runtime)
+coremltools>=7.0
 
-# Optional: Gemini API support (not currently used)
-# google-genai>=1.0.0
-# pillow>=10.2.0
+# Optional: Export YOLO to CoreML (one-time, run scripts/export_coreml.py)
+# ultralytics>=8.0.0
+# torch>=2.0.0

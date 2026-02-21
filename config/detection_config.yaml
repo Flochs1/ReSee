@@ -1,0 +1,27 @@
+# Detection Configuration
+
+detection:
+  enabled: true
+
+  # Path to model file
+  # CoreML: models/yolov8n.mlpackage (no PyTorch required)
+  # YOLO: yolov8n.pt (requires PyTorch - causes OpenCV slowdown)
+  model_path: "models/yolov8n.mlpackage"
+
+  # Minimum confidence for detections
+  confidence_threshold: 0.5
+
+  # Use CoreML (recommended) vs ultralytics/PyTorch
+  # CoreML: Fast, no PyTorch dependency, no OpenCV conflict
+  # PyTorch: Slower depth estimation due to library conflicts
+  use_coreml: true
+
+tracking:
+  # Minimum IoU to match detection to existing track
+  iou_threshold: 0.3
+
+  # Seconds before dropping unseen tracks
+  max_age_seconds: 1.0
+
+  # Depth history for closing speed calculation
+  depth_history_frames: 30

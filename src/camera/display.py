@@ -144,8 +144,8 @@ class VideoDisplay:
             # Display frame
             cv2.imshow(self.window_name, display_frame)
 
-            # Process window events (required for display to update)
-            cv2.waitKey(1)
+            # Note: waitKey is called separately via check_key_press()
+            # to avoid consuming key events here
 
             return True
 
@@ -156,7 +156,9 @@ class VideoDisplay:
 
     def check_key_press(self, timeout: int = 1) -> int:
         """
-        Check for key press.
+        Check for key press and process window events.
+
+        This MUST be called regularly for the display to update.
 
         Args:
             timeout: Wait timeout in milliseconds.
@@ -168,7 +170,11 @@ class VideoDisplay:
             return -1
 
         try:
-            return cv2.waitKey(timeout) & 0xFF
+            key = cv2.waitKey(timeout) & 0xFF
+            # Also check if window was closed via X button
+            if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
+                return 27  # Return ESC to signal close
+            return key
         except Exception:
             return -1
 

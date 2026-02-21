@@ -5,17 +5,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run the application (with depth estimation)
-python -m src.main
+# PRIMARY: Run with startup script (manages venv, installs deps automatically)
+./startup.sh
 
 # Run without depth estimation
-python -m src.main --no-depth
+./startup.sh --no-depth
+
+# Run without object detection
+./startup.sh --no-detection
+
+# Run with only stereo view (no depth, no detection)
+./startup.sh --no-depth --no-detection
 
 # Force recalibration
-python -m src.main --recalibrate
+./startup.sh --recalibrate
+
+# Direct python (if venv already activated)
+python -m src.main
+python -m src.main --no-depth --no-detection
 
 # Run headless (no display)
-OPENCV_HEADLESS=1 python -m src.main --no-depth
+OPENCV_HEADLESS=1 ./startup.sh --no-depth
 
 # List available cameras and get recommended config
 python list_cameras.py
@@ -23,17 +33,8 @@ python list_cameras.py
 # Test camera resolutions
 python test_resolution.py
 
-# Install dependencies
+# Install dependencies manually
 pip install -r requirements.txt
-
-# System dependencies (for audio capture)
-# macOS:
-brew install portaudio
-# Ubuntu/Debian:
-sudo apt-get install python3-pyaudio portaudio19-dev
-
-# Alternative: use the run script (manages venv automatically)
-./run.sh
 ```
 
 There is no test suite currently — `tests/` is empty.
@@ -53,6 +54,7 @@ ReSee is a stereo camera viewer that captures from an ELP dual-lens USB camera, 
 **CLI arguments:**
 - `--recalibrate`: Force stereo calibration even if calibration data exists
 - `--no-depth`: Disable depth estimation (stereo view only)
+- `--no-detection`: Disable object detection
 
 **Data flow:**
 1. `StereoCamera` (`src/camera/stereo_capture.py`) opens the camera and runs a background capture thread that continuously reads frames into a bounded `Queue` (size 3, drops oldest on overflow).
@@ -68,6 +70,8 @@ ReSee is a stereo camera viewer that captures from an ELP dual-lens USB camera, 
 **Stereo calibration** (`src/calibration/stereo_calibrator.py`): `StereoCalibrator` handles interactive checkerboard-based stereo calibration. On first run (or with `--recalibrate`), displays a 9x6 checkerboard pattern and prompts user to capture 15 frames from different angles. Computes camera matrices, distortion coefficients, rotation/translation between cameras, and rectification maps. Saves to `config/calibration/stereo_calib.npz`.
 
 **Depth estimation** (`src/calibration/depth_estimator.py`): `DepthEstimator` applies rectification maps, computes disparity using StereoSGBM, converts to depth using `depth = (focal * baseline) / disparity`, and applies RYGB colormap (Red=near, Blue=far). Includes legend showing depth scale.
+
+**Object detection** (`src/detection/`): YOLOv8n-based object detection using CoreML (no PyTorch at runtime). `CoreMLDetector` runs inference via Apple's Neural Engine, `ObjectTracker` maintains track IDs across frames with IoU matching and computes closing speed from depth history. `DetectionPipeline` wraps both. Config in `config/detection_config.yaml`. Model at `models/yolov8n.mlpackage`.
 
 **Gemini integration** (`src/gemini/`): `GeminiLiveClient` manages a WebSocket connection to the Gemini BidiGenerateContent endpoint. `GeminiMessage` constructs the protocol messages (setup, realtime video/audio input, text). This subsystem is fully implemented but not called from `src/main.py`.
 
@@ -88,5 +92,17 @@ Key settings in `config/config.yaml`:
 - `depth.num_disparities`: disparity search range, must be divisible by 16 (default `64`)
 - `depth.block_size`: block matching size, must be odd (default `9`)
 - `depth.min_depth_m` / `depth.max_depth_m`: depth range for colorization (default `0.3` - `5.0` meters)
+
+Detection settings in `config/detection_config.yaml`:
+
+- `detection.enabled`: enable/disable object detection (default `true`)
+- `detection.model_path`: CoreML model path (default `models/yolov8n.mlpackage`)
+- `detection.confidence_threshold`: minimum confidence for detections (default `0.5`)
+- `detection.use_coreml`: use CoreML (recommended) vs ultralytics/PyTorch (default `true`)
+- `tracking.iou_threshold`: IoU threshold for track matching (default `0.3`)
+- `tracking.max_age_seconds`: time before dropping unseen tracks (default `1.0`)
+- `tracking.depth_history_frames`: samples for closing speed calculation (default `30`)
+
+To re-export the CoreML model: `python scripts/export_coreml.py` (requires ultralytics/torch one-time)
 
 `.env` file (copy from `.env.example`) is required by `run.sh` but only needed at runtime if using the Gemini integration (`GEMINI_API_KEY`).

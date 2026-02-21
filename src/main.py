@@ -38,23 +38,30 @@ def parse_args():
         action='store_true',
         help='Disable depth estimation (stereo view only)'
     )
+    parser.add_argument(
+        '--no-detection',
+        action='store_true',
+        help='Disable object detection'
+    )
     return parser.parse_args()
 
 
 class ReSeeApp:
     """Stereo camera viewer application with depth estimation."""
 
-    def __init__(self, recalibrate: bool = False, no_depth: bool = False):
+    def __init__(self, recalibrate: bool = False, no_depth: bool = False, no_detection: bool = False):
         """
         Initialize ReSee camera viewer.
 
         Args:
             recalibrate: Force recalibration even if data exists.
             no_depth: Disable depth estimation.
+            no_detection: Disable object detection.
         """
         # CLI options
         self.recalibrate = recalibrate
         self.no_depth = no_depth
+        self.no_detection = no_detection
 
         # Load configuration
         self.settings = get_settings()
@@ -75,6 +82,7 @@ class ReSeeApp:
         self.display: Optional[VideoDisplay] = None
         self.depth_estimator: Optional[DepthEstimator] = None
         self.calibrator: Optional[StereoCalibrator] = None
+        self.detection_pipeline = None  # Initialized in initialize()
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -83,6 +91,7 @@ class ReSeeApp:
         # Control flags
         self.running = False
         self.depth_enabled = False
+        self.detection_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -145,6 +154,12 @@ class ReSeeApp:
                 self.logger.info("Depth estimation disabled by --no-depth flag")
             else:
                 self.logger.info("Depth estimation disabled in config")
+
+            # Initialize detection pipeline if enabled
+            if not self.no_detection:
+                self._initialize_detection()
+            else:
+                self.logger.info("Object detection disabled by --no-detection flag")
 
             self.logger.info("All components initialized successfully")
             return True
@@ -231,6 +246,27 @@ class ReSeeApp:
             self.logger.error(f"Failed to create depth estimator: {e}")
             return False
 
+    def _initialize_detection(self) -> bool:
+        """
+        Initialize object detection pipeline.
+
+        Returns:
+            True if detection is ready, False otherwise.
+        """
+        try:
+            from src.detection import DetectionPipeline
+            self.detection_pipeline = DetectionPipeline(enabled=True)
+            self.detection_enabled = self.detection_pipeline.is_enabled()
+            if self.detection_enabled:
+                self.logger.info("Object detection enabled")
+            return self.detection_enabled
+        except ImportError as e:
+            self.logger.warning(f"Detection not available: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to initialize detection: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -240,6 +276,10 @@ class ReSeeApp:
             self.logger.info("Depth estimation: ENABLED")
         else:
             self.logger.info("Depth estimation: DISABLED")
+        if self.detection_enabled:
+            self.logger.info("Object detection: ENABLED")
+        else:
+            self.logger.info("Object detection: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         self.logger.info("-" * 60)
 
@@ -282,21 +322,28 @@ class ReSeeApp:
                     else:
                         right_resized = right_frame
 
-                    # Combine side-by-side for stereo view
-                    stereo_combined = np.hstack((left_resized, right_resized))
-
                     # Process depth if enabled
+                    depth_map = None
                     if self.depth_enabled and self.depth_estimator:
-                        depth_colored, _ = self.depth_estimator.process_frame(
+                        depth_colored, depth_map = self.depth_estimator.process_frame(
                             left_resized, right_resized, include_legend=True
                         )
 
-                        # Resize depth to match stereo width
+                    # Process detection if enabled
+                    if self.detection_enabled and self.detection_pipeline:
+                        left_resized, _ = self.detection_pipeline.process(
+                            left_resized, depth_map
+                        )
+
+                    # Combine side-by-side for stereo view
+                    stereo_combined = np.hstack((left_resized, right_resized))
+
+                    # Stack depth visualization if available
+                    if self.depth_enabled and self.depth_estimator:
                         stereo_width = stereo_combined.shape[1]
                         depth_height = depth_colored.shape[0]
                         depth_width = depth_colored.shape[1]
 
-                        # Scale depth to match stereo width while preserving aspect ratio
                         scale_factor = stereo_width / depth_width
                         new_depth_height = int(depth_height * scale_factor)
                         depth_resized = cv2.resize(
@@ -304,7 +351,6 @@ class ReSeeApp:
                             (stereo_width, new_depth_height)
                         )
 
-                        # Stack stereo on top, depth below
                         combined_frame = np.vstack((stereo_combined, depth_resized))
                     else:
                         combined_frame = stereo_combined
@@ -312,7 +358,8 @@ class ReSeeApp:
                     # Create status
                     elapsed = time.time() - start_time
                     depth_status = " | Depth: ON" if self.depth_enabled else ""
-                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}"
+                    detection_status = " | Detection: ON" if self.detection_enabled else ""
+                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}"
 
                     self.display.show_frame(
                         combined_frame,
@@ -331,8 +378,7 @@ class ReSeeApp:
                     elapsed = time.time() - start_time
                     avg_fps = frame_count / elapsed if elapsed > 0 else 0
                     self.logger.info(
-                        f"Frames: {frame_count}, Current FPS: {current_fps:.1f}, "
-                        f"Average FPS: {avg_fps:.1f}"
+                        f"Frames: {frame_count}, FPS: {current_fps:.1f}, Avg: {avg_fps:.1f}"
                     )
 
         except Exception as e:
@@ -407,7 +453,8 @@ def main() -> int:
     args = parse_args()
     app = ReSeeApp(
         recalibrate=args.recalibrate,
-        no_depth=args.no_depth
+        no_depth=args.no_depth,
+        no_detection=args.no_detection
     )
     return app.run()
 
