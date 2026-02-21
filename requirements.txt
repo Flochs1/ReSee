@@ -11,6 +11,5 @@ colorama>=0.4.6
 # Optional: Audio support (not currently used)
 # pyaudio>=0.2.14
 
-# Optional: Gemini API support (not currently used)
-# google-genai>=1.0.0
-# pillow>=10.2.0
+# Gemini API support
+google-genai>=1.0.0

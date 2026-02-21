@@ -6,6 +6,7 @@ Compatible with macOS, Linux, and Raspberry Pi.
 """
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -14,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 import cv2
+from dotenv import load_dotenv
 
 from src.config.settings import get_settings
 from src.utils.logger import setup_logger, get_logger
@@ -21,6 +23,7 @@ from src.utils.timing import FPSController, FrameTimer
 from src.camera.stereo_capture import StereoCamera, StereoCameraError
 from src.camera.display import VideoDisplay
 from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
+from src.gemini import GeminiClient, GeminiClientError
 
 
 def parse_args():
@@ -75,6 +78,7 @@ class ReSeeApp:
         self.display: Optional[VideoDisplay] = None
         self.depth_estimator: Optional[DepthEstimator] = None
         self.calibrator: Optional[StereoCalibrator] = None
+        self.gemini_client: Optional[GeminiClient] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -83,6 +87,11 @@ class ReSeeApp:
         # Control flags
         self.running = False
         self.depth_enabled = False
+        self.gemini_available = False
+
+        # Frame storage for Gemini analysis
+        self.last_camera_frame: Optional[np.ndarray] = None
+        self.last_depth_frame: Optional[np.ndarray] = None
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -145,6 +154,9 @@ class ReSeeApp:
                 self.logger.info("Depth estimation disabled by --no-depth flag")
             else:
                 self.logger.info("Depth estimation disabled in config")
+
+            # Initialize Gemini client
+            self._initialize_gemini()
 
             self.logger.info("All components initialized successfully")
             return True
@@ -231,6 +243,49 @@ class ReSeeApp:
             self.logger.error(f"Failed to create depth estimator: {e}")
             return False
 
+    def _initialize_gemini(self) -> None:
+        """Initialize Gemini client for obstacle analysis."""
+        load_dotenv()
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if not api_key:
+            self.logger.warning("GEMINI_API_KEY not found in .env - Gemini analysis disabled")
+            return
+
+        try:
+            self.gemini_client = GeminiClient(api_key=api_key)
+            self.gemini_available = True
+            self.logger.info("Gemini client ready (press SPACE to analyze obstacles)")
+        except GeminiClientError as e:
+            self.logger.warning(f"Gemini initialization failed: {e}")
+
+    def _analyze_with_gemini(self) -> None:
+        """Send current frames to Gemini for obstacle analysis."""
+        if not self.gemini_available or not self.gemini_client:
+            self.logger.warning("Gemini not available")
+            return
+
+        if self.last_camera_frame is None or self.last_depth_frame is None:
+            self.logger.warning("No frames available for analysis")
+            return
+
+        self.logger.info("Analyzing obstacles with Gemini...")
+        print("\n" + "=" * 60)
+        print("GEMINI OBSTACLE ANALYSIS")
+        print("=" * 60)
+
+        result = self.gemini_client.analyze_obstacles(
+            self.last_camera_frame,
+            self.last_depth_frame
+        )
+
+        if result:
+            print(result)
+        else:
+            print("Failed to get analysis from Gemini")
+
+        print("=" * 60 + "\n")
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -240,6 +295,8 @@ class ReSeeApp:
             self.logger.info("Depth estimation: ENABLED")
         else:
             self.logger.info("Depth estimation: DISABLED")
+        if self.gemini_available:
+            self.logger.info("Gemini analysis: ENABLED (press SPACE to analyze)")
         self.logger.info("Press Ctrl+C or ESC to stop")
         self.logger.info("-" * 60)
 
@@ -291,6 +348,10 @@ class ReSeeApp:
                             left_resized, right_resized, include_legend=True
                         )
 
+                        # Store frames for Gemini analysis
+                        self.last_camera_frame = left_resized.copy()
+                        self.last_depth_frame = depth_colored.copy()
+
                         # Resize depth to match stereo width
                         stereo_width = stereo_combined.shape[1]
                         depth_height = depth_colored.shape[0]
@@ -320,11 +381,13 @@ class ReSeeApp:
                         status=status
                     )
 
-                    # Check for ESC key to quit
+                    # Check for key presses
                     key = self.display.check_key_press(1)
                     if key == 27:  # ESC
                         self.logger.info("ESC pressed, stopping...")
                         break
+                    elif key == 32:  # SPACE
+                        self._analyze_with_gemini()
 
                 # Log progress every 100 frames
                 if frame_count % 100 == 0:
