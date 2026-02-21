@@ -1,0 +1,7 @@
+Collecting opencv-contrib-python
+  Downloading opencv_contrib_python-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl.metadata (19 kB)
+Requirement already satisfied: numpy>=2 in ./venv/lib/python3.13/site-packages (from opencv-contrib-python) (2.4.2)
+Downloading opencv_contrib_python-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl (52.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 52.0/52.0 MB 2.4 MB/s  0:00:21
+Installing collected packages: opencv-contrib-python
+Successfully installed opencv-contrib-python-4.13.0.92

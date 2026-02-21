@@ -1,5 +1,5 @@
 # Core dependencies for stereo camera viewer
-opencv-python>=4.9.0
+opencv-contrib-python>=4.9.0  # contrib version required for WLS disparity filter
 numpy>=1.26.0
 python-dotenv>=1.0.0
 pyyaml>=6.0.1

@@ -54,7 +54,7 @@ class DepthEstimator:
                 self.focal_length = 1000  # Default fallback
 
         # Create stereo matcher (SGBM gives better results than BM)
-        self.stereo = cv2.StereoSGBM_create(
+        self.stereo_left = cv2.StereoSGBM_create(
             minDisparity=0,
             numDisparities=num_disparities,
             blockSize=block_size,
@@ -67,6 +67,14 @@ class DepthEstimator:
             preFilterCap=63,
             mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
         )
+
+        # Create right matcher for WLS filter
+        self.stereo_right = cv2.ximgproc.createRightMatcher(self.stereo_left)
+
+        # Create WLS filter for disparity refinement
+        self.wls_filter = cv2.ximgproc.createDisparityWLSFilter(self.stereo_left)
+        self.wls_filter.setLambda(8000)  # Smoothing strength
+        self.wls_filter.setSigmaColor(1.5)  # Edge sensitivity
 
         # Pre-compute colormap LUT for RYGB gradient
         self.colormap_lut = self._create_rygb_colormap()
@@ -148,14 +156,14 @@ class DepthEstimator:
         right_rect: np.ndarray
     ) -> np.ndarray:
         """
-        Compute disparity map from rectified stereo pair.
+        Compute disparity map from rectified stereo pair with WLS filtering.
 
         Args:
             left_rect: Rectified left frame.
             right_rect: Rectified right frame.
 
         Returns:
-            Disparity map (float32, scaled by 16).
+            Disparity map (float32).
         """
         # Convert to grayscale for stereo matching
         if len(left_rect.shape) == 3:
@@ -168,11 +176,18 @@ class DepthEstimator:
         else:
             gray_right = right_rect
 
-        # Compute disparity
-        disparity = self.stereo.compute(gray_left, gray_right)
+        # Compute left and right disparities for WLS filter
+        disp_left = self.stereo_left.compute(gray_left, gray_right)
+        disp_right = self.stereo_right.compute(gray_right, gray_left)
 
-        # SGBM returns disparity scaled by 16, convert to float
+        # Apply WLS filter for edge-preserving smoothing
+        disparity = self.wls_filter.filter(disp_left, gray_left, None, disp_right)
+
+        # Convert to float (SGBM returns disparity scaled by 16)
         disparity = disparity.astype(np.float32) / 16.0
+
+        # Apply median filter to remove remaining speckle noise
+        disparity = cv2.medianBlur(disparity.astype(np.float32), 5)
 
         return disparity
 
