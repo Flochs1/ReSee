@@ -28,9 +28,8 @@ class DepthEstimator:
             baseline_mm: Distance between camera centers in mm.
             num_disparities: Number of disparities for stereo matching.
             block_size: Block size for stereo matching (must be odd).
-            min_depth_m: Minimum depth for colorization (meters). Anything
-                         closer is shown as red.
-            max_depth_m: Maximum depth for colorization (meters). Shown as blue.
+            min_depth_m: Ignored - kept for API compatibility.
+            max_depth_m: Ignored - kept for API compatibility.
         """
         self.rectify_map_left = calibration_data['rectify_map_left']
         self.rectify_map_right = calibration_data['rectify_map_right']
@@ -40,8 +39,6 @@ class DepthEstimator:
         self.baseline_m = baseline_mm / 1000.0
         self.num_disparities = num_disparities
         self.block_size = block_size
-        self.min_depth = min_depth_m
-        self.max_depth = max_depth_m
 
         # Get focal length from Q matrix (in pixels)
         # Q[2,3] = -focal_length, Q[3,2] = 1/baseline
@@ -53,6 +50,10 @@ class DepthEstimator:
                 self.focal_length = calibration_data['camera_matrix_left'][0, 0]
             else:
                 self.focal_length = 1000  # Default fallback
+
+        # Depth range for colorization
+        self.min_depth = 1.0   # 1m and closer shown as red
+        self.max_depth = 15.0  # 15m and further shown as blue
 
         # Create stereo matcher (SGBM gives better results than BM)
         self.stereo_left = cv2.StereoSGBM_create(
@@ -82,7 +83,8 @@ class DepthEstimator:
 
         logger.info(
             f"Depth estimator initialized: baseline={baseline_mm}mm, "
-            f"disparities={num_disparities}, block_size={block_size}"
+            f"disparities={num_disparities}, block_size={block_size}, "
+            f"depth_range={self.min_depth:.1f}-{self.max_depth:.1f}m"
         )
 
     def _create_rygb_colormap(self) -> np.ndarray:
@@ -213,10 +215,10 @@ class DepthEstimator:
 
     def colorize_depth(self, depth: np.ndarray) -> np.ndarray:
         """
-        Apply RYGB colormap to depth map (linear).
+        Apply RYGB colormap to depth map using logarithmic scale.
 
-        Red = near (min_depth or closer), Blue = far (max_depth).
-        Linear interpolation between min and max depth.
+        Red = near (1m or closer), Blue = far (max theoretical depth).
+        Logarithmic scale gives better resolution for near objects.
 
         Args:
             depth: Depth map in meters.
@@ -224,11 +226,19 @@ class DepthEstimator:
         Returns:
             Colorized depth image (BGR).
         """
-        # Linear normalization: anything <= min_depth is 0 (red), max_depth is 1 (blue)
-        normalized = np.clip(
-            (depth - self.min_depth) / (self.max_depth - self.min_depth),
-            0, 1
-        )
+        # Use logarithmic scale for better near-field resolution
+        # Map log(min_depth) to 0 (red) and log(max_depth) to 1 (blue)
+        log_min = np.log(self.min_depth)
+        log_max = np.log(self.max_depth)
+
+        # Clip depth to valid range before log
+        depth_clipped = np.clip(depth, self.min_depth, self.max_depth)
+
+        # Logarithmic normalization
+        with np.errstate(divide='ignore', invalid='ignore'):
+            normalized = (np.log(depth_clipped) - log_min) / (log_max - log_min)
+            normalized = np.clip(normalized, 0, 1)
+
         normalized = (normalized * 255).astype(np.uint8)
 
         # Apply colormap
@@ -249,7 +259,7 @@ class DepthEstimator:
         width: int = 60
     ) -> np.ndarray:
         """
-        Create a vertical color legend showing depth scale.
+        Create a vertical color legend showing depth scale (logarithmic).
 
         Args:
             height: Height of the legend (matches depth map height).
@@ -271,26 +281,31 @@ class DepthEstimator:
         legend = np.zeros((height, width, 3), dtype=np.uint8)
         legend[:, :width - 30] = legend_bar
 
-        # Add depth labels (linear scale)
+        # Add depth labels (logarithmic scale)
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.35
         color = (255, 255, 255)
         thickness = 1
 
-        depth_range = self.max_depth - self.min_depth
-        labels = [
-            (0, f"{self.min_depth:.1f}m"),
-            (height // 4, f"{self.min_depth + depth_range * 0.25:.1f}m"),
-            (height // 2, f"{self.min_depth + depth_range * 0.5:.1f}m"),
-            (3 * height // 4, f"{self.min_depth + depth_range * 0.75:.1f}m"),
-            (height - 15, f"{self.max_depth:.1f}m")
-        ]
+        # Logarithmic depth markers: 1m, 2m, 5m, 10m, 15m
+        log_min = np.log(self.min_depth)
+        log_max = np.log(self.max_depth)
+        log_range = log_max - log_min
+
+        depth_markers = [1, 2, 5, 10, 15]
+        labels = []
+        for d in depth_markers:
+            if d >= self.min_depth and d <= self.max_depth:
+                # Convert depth to normalized position (0-1) then to pixel position
+                norm_pos = (np.log(d) - log_min) / log_range
+                y_pos = int(norm_pos * (height - 1))
+                labels.append((y_pos, f"{d}m"))
 
         for y, text in labels:
             cv2.putText(
                 legend,
                 text,
-                (width - 28, y + 10),
+                (width - 28, y + 5),
                 font,
                 font_scale,
                 color,
