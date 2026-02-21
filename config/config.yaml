@@ -1,0 +1,68 @@
+# ReSee Configuration File
+
+camera:
+  # Video resolution per camera (trying 1600x1200 = 3200x1200 combined side-by-side)
+  resolution:
+    width: 1600
+    height: 1200
+
+  # Target frames per second
+  fps: 10
+
+  # Camera device mode: auto, single, dual, retrieve
+  # single: ELP stereo camera outputs side-by-side stitched image
+  device_mode: single
+
+  # Device index for the ELP stereo camera (Camera 0)
+  device_indices: [0, 0]
+
+  # JPEG quality for encoding (1-100, higher = better quality, larger size)
+  jpeg_quality: 85
+
+  # Buffer size for frame queue (2-5 recommended)
+  buffer_size: 3
+
+# Audio configuration (optional - currently disabled)
+# audio:
+#   # Audio sample rate in Hz
+#   sample_rate: 16000
+#
+#   # Audio format (int16 = 16-bit PCM)
+#   format: int16
+#
+#   # Number of audio channels (1 = mono, 2 = stereo)
+#   channels: 1
+#
+#   # Audio chunk size in samples
+#   chunk_size: 1024
+#
+#   # Audio device index (null = system default)
+#   device_index: null
+
+# Gemini API settings removed - this is now a simple camera viewer
+
+display:
+  # Enable video preview window (falls back to headless if unavailable)
+  preview_enabled: true
+
+  # Window name for video preview
+  window_name: "ReSee - Stereo Camera Preview"
+
+  # Show FPS counter on preview
+  show_fps: true
+
+  # Show connection status on preview
+  show_status: true
+
+  # Preview window scale factor (1.0 = full size, 0.5 = half size)
+  scale: 0.5
+
+logging:
+  # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+
+  # Enable colored console output
+  console_colors: true
+
+  # Log format string
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

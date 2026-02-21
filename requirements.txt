@@ -1,0 +1,16 @@
+# Core dependencies for stereo camera viewer
+opencv-python>=4.9.0
+numpy>=1.26.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# Configuration and utilities
+pydantic>=2.6.0
+colorama>=0.4.6
+
+# Optional: Audio support (not currently used)
+# pyaudio>=0.2.14
+
+# Optional: Gemini API support (not currently used)
+# google-genai>=1.0.0
+# pillow>=10.2.0
