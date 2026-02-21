@@ -83,6 +83,7 @@ class ReSeeApp:
         self.depth_estimator: Optional[DepthEstimator] = None
         self.calibrator: Optional[StereoCalibrator] = None
         self.detection_pipeline = None  # Initialized in initialize()
+        self.birdseye_view = None  # Initialized in initialize()
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -158,6 +159,13 @@ class ReSeeApp:
             # Initialize detection pipeline if enabled
             if not self.no_detection:
                 self._initialize_detection()
+                # Initialize bird's eye view if detection is enabled
+                if self.detection_enabled:
+                    from src.detection import BirdsEyeView
+                    self.birdseye_view = BirdsEyeView(
+                        max_depth_m=self.settings.depth.max_depth_m
+                    )
+                    self.logger.info("Bird's eye view enabled")
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
 
@@ -330,8 +338,9 @@ class ReSeeApp:
                         )
 
                     # Process detection if enabled
+                    tracks = []
                     if self.detection_enabled and self.detection_pipeline:
-                        left_resized, _ = self.detection_pipeline.process(
+                        left_resized, tracks = self.detection_pipeline.process(
                             left_resized, depth_map
                         )
 
@@ -354,6 +363,23 @@ class ReSeeApp:
                         combined_frame = np.vstack((stereo_combined, depth_resized))
                     else:
                         combined_frame = stereo_combined
+
+                    # Add bird's eye view if detection is enabled
+                    if self.birdseye_view and tracks:
+                        birdseye_frame = self.birdseye_view.render(
+                            tracks,
+                            frame_width=target_w,
+                            depth_map=depth_map
+                        )
+                        # Scale bird's eye view to match combined frame width
+                        combined_width = combined_frame.shape[1]
+                        bev_scale = combined_width / birdseye_frame.shape[1]
+                        bev_height = int(birdseye_frame.shape[0] * bev_scale)
+                        birdseye_resized = cv2.resize(
+                            birdseye_frame,
+                            (combined_width, bev_height)
+                        )
+                        combined_frame = np.vstack((combined_frame, birdseye_resized))
 
                     # Create status
                     elapsed = time.time() - start_time
