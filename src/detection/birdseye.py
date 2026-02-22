@@ -40,8 +40,15 @@ class BirdsEyeView:
         self.fov_degrees = fov_degrees
         self.fov_rad = math.radians(fov_degrees)
 
-        # Pixels per meter (radius fills half the view)
-        self.scale = min(width, height) / (2 * max_depth_m) * 0.9
+        # Maximum radius in pixels (fills 90% of half the view)
+        self.max_radius_px = min(width, height) / 2 * 0.9
+
+        # Non-linear scaling exponent:
+        # - 5m takes 50% of radius
+        # - 10m takes 80% of radius
+        # Using power function: normalized_radius = (depth / max_depth) ^ exponent
+        # Exponent ~0.55 gives: 5m→50%, 10m→80%, 15m→100%
+        self.depth_exponent = 0.55
 
         # Colors for different object classes (BGR)
         self.class_colors = {
@@ -63,6 +70,24 @@ class BirdsEyeView:
             'refrigerator': (128, 128, 128),  # Gray
         }
         self.default_color = (128, 128, 128)  # Gray
+
+    def _depth_to_radius(self, depth_m: float) -> float:
+        """
+        Convert depth in meters to radius in pixels using non-linear scaling.
+
+        Near objects (0-5m) take up 50% of the radius.
+        Mid-range (0-10m) takes up 80% of the radius.
+        This makes nearby objects more spread out and easier to see.
+        """
+        if depth_m <= 0:
+            return 0.0
+        if depth_m >= self.max_depth_m:
+            return self.max_radius_px
+
+        # Non-linear scaling: r = max_r * (d / max_d) ^ exponent
+        normalized = depth_m / self.max_depth_m
+        scaled = pow(normalized, self.depth_exponent)
+        return scaled * self.max_radius_px
 
     def render(
         self,
@@ -131,16 +156,15 @@ class BirdsEyeView:
             norm_x = bbox_center_x / frame_width
             angle = (norm_x - 0.5) * self.fov_rad  # -fov/2 to +fov/2
 
-            # Convert polar (angle, depth) to cartesian (x, y)
+            # Convert depth to screen radius (non-linear scaling)
+            radius_px = self._depth_to_radius(depth)
+
+            # Convert polar (angle, radius) to screen coordinates
             # Camera faces up (north), so:
             # - positive angle = right = positive x
-            # - depth = distance forward = positive y (but screen y is inverted)
-            obj_x = depth * math.sin(angle)
-            obj_y = depth * math.cos(angle)
-
-            # Convert to screen coordinates
-            view_x = int(center_x + obj_x * self.scale)
-            view_y = int(center_y - obj_y * self.scale)  # Invert Y for screen
+            # - forward = negative screen y
+            view_x = int(center_x + radius_px * math.sin(angle))
+            view_y = int(center_y - radius_px * math.cos(angle))
 
             # Clamp to view bounds
             view_x = max(10, min(self.width - 10, view_x))
@@ -189,17 +213,16 @@ class BirdsEyeView:
         return view
 
     def _draw_circular_grid(self, view: np.ndarray, center_x: int, center_y: int) -> None:
-        """Draw circular distance grid centered on camera."""
-        # Draw concentric circles at distance intervals
-        if self.max_depth_m <= 5:
-            interval = 1
-        elif self.max_depth_m <= 10:
-            interval = 2
-        else:
-            interval = 5  # 5m intervals for 15m range
+        """Draw circular distance grid centered on camera (non-linear spacing)."""
+        # Draw circles at key distances: 2m, 5m, 10m, 15m
+        distances = [2, 5, 10, 15]
 
-        for dist_m in range(interval, int(self.max_depth_m) + 1, interval):
-            radius_px = int(dist_m * self.scale)
+        for dist_m in distances:
+            if dist_m > self.max_depth_m:
+                continue
+
+            # Use non-linear scaling for circle radius
+            radius_px = int(self._depth_to_radius(dist_m))
             cv2.circle(view, (center_x, center_y), radius_px, (60, 60, 60), 1)
 
             # Label at top of circle
@@ -210,13 +233,13 @@ class BirdsEyeView:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
         # Draw outer boundary circle
-        boundary_radius = int(self.max_depth_m * self.scale)
+        boundary_radius = int(self.max_radius_px)
         cv2.circle(view, (center_x, center_y), boundary_radius, (80, 80, 80), 2)
 
     def _draw_fov_cone(self, view: np.ndarray, center_x: int, center_y: int, heading: float = 0.0) -> None:
         """Draw FOV cone lines from camera."""
         half_fov = self.fov_rad / 2
-        line_length = int(self.max_depth_m * self.scale)
+        line_length = int(self.max_radius_px)
 
         # Left FOV boundary
         left_angle = -half_fov + heading
@@ -276,8 +299,19 @@ class BirdsEyeView:
             dy = pose.y - camera_pose.y
 
             # Rotate by negative heading so camera's heading is always up
-            screen_x = center_x + int((dx * cos_h - dy * sin_h) * self.scale)
-            screen_y = center_y - int((dx * sin_h + dy * cos_h) * self.scale)
+            rotated_x = dx * cos_h - dy * sin_h
+            rotated_y = dx * sin_h + dy * cos_h
+
+            # Apply non-linear scaling based on distance
+            dist = math.sqrt(rotated_x * rotated_x + rotated_y * rotated_y)
+            if dist > 0.01:
+                radius_px = self._depth_to_radius(dist)
+                scale_factor = radius_px / dist
+                screen_x = center_x + int(rotated_x * scale_factor)
+                screen_y = center_y - int(rotated_y * scale_factor)
+            else:
+                screen_x = center_x
+                screen_y = center_y
 
             points.append((screen_x, screen_y))
 
@@ -293,48 +327,56 @@ class BirdsEyeView:
             cv2.circle(view, points[0], 4, (0, 100, 255), -1)  # Orange
 
     def _draw_compass(self, view: np.ndarray, heading: float) -> None:
-        """Draw compass showing cardinal directions."""
+        """Draw compass with fixed N at top and heading in degrees."""
         # Compass position (top-right corner)
         compass_x = self.width - 50
-        compass_y = 50
-        radius = 30
+        compass_y = 55
+        radius = 35
 
         # Draw compass circle
-        cv2.circle(view, (compass_x, compass_y), radius, (60, 60, 60), 1)
+        cv2.circle(view, (compass_x, compass_y), radius, (80, 80, 80), 2)
 
-        # Draw cardinal directions (rotated by negative heading)
+        # Draw fixed cardinal directions (N always at top)
         directions = [
-            ('N', 0),
-            ('E', math.pi / 2),
-            ('S', math.pi),
-            ('W', -math.pi / 2)
+            ('N', 0, -1),      # top
+            ('E', 1, 0),       # right
+            ('S', 0, 1),       # bottom
+            ('W', -1, 0)       # left
         ]
 
-        for label, angle in directions:
-            # Rotate direction by negative heading
-            rotated_angle = angle - heading
-            dx = int(radius * 0.8 * math.sin(rotated_angle))
-            dy = int(-radius * 0.8 * math.cos(rotated_angle))
-
-            # Position for label
-            label_x = compass_x + dx - 4
-            label_y = compass_y + dy + 4
-
-            # Draw label (N is highlighted)
-            color = (0, 200, 255) if label == 'N' else (150, 150, 150)
+        for label, dx, dy in directions:
+            label_x = compass_x + int(dx * (radius + 12)) - 4
+            label_y = compass_y + int(dy * (radius + 12)) + 4
+            color = (0, 200, 255) if label == 'N' else (120, 120, 120)
             cv2.putText(view, label, (label_x, label_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Draw north arrow (always points to actual north)
-        north_angle = -heading
-        arrow_len = radius - 5
-        north_dx = int(arrow_len * math.sin(north_angle))
-        north_dy = int(-arrow_len * math.cos(north_angle))
+        # Draw tick marks every 30 degrees
+        for deg in range(0, 360, 30):
+            angle_rad = math.radians(deg)
+            inner_r = radius - 5
+            outer_r = radius
+            x1 = compass_x + int(inner_r * math.sin(angle_rad))
+            y1 = compass_y - int(inner_r * math.cos(angle_rad))
+            x2 = compass_x + int(outer_r * math.sin(angle_rad))
+            y2 = compass_y - int(outer_r * math.cos(angle_rad))
+            cv2.line(view, (x1, y1), (x2, y2), (100, 100, 100), 1)
+
+        # Draw heading arrow (shows camera direction relative to north)
+        arrow_len = radius - 8
+        heading_dx = int(arrow_len * math.sin(heading))
+        heading_dy = int(-arrow_len * math.cos(heading))
         cv2.arrowedLine(
             view,
             (compass_x, compass_y),
-            (compass_x + north_dx, compass_y + north_dy),
-            (0, 200, 255),  # Yellow/orange
-            1,
-            tipLength=0.4
+            (compass_x + heading_dx, compass_y + heading_dy),
+            (0, 255, 0),  # Green - camera direction
+            2,
+            tipLength=0.35
         )
+
+        # Draw heading in degrees below compass
+        heading_deg = math.degrees(heading) % 360
+        heading_text = f"{heading_deg:.0f}"
+        cv2.putText(view, heading_text, (compass_x - 12, compass_y + radius + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)

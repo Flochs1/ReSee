@@ -6,6 +6,9 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+# Note: Optional used for type hints in config models
+
+
 class DetectionConfig(BaseModel):
     """Object detection settings."""
     enabled: bool = True
@@ -14,11 +17,21 @@ class DetectionConfig(BaseModel):
     use_coreml: bool = True  # Use CoreML (no PyTorch) vs ultralytics (requires PyTorch)
 
 
+class ReIDConfig(BaseModel):
+    """Re-identification settings."""
+    enabled: bool = True
+    model_path: Optional[str] = None  # Optional CoreML model path
+    embedding_dim: int = Field(default=256, ge=64, le=512)
+    weight: float = Field(default=0.3, ge=0.0, le=1.0)  # Weight for ReID in combined matching
+    threshold: float = Field(default=0.5, ge=0.1, le=0.95)  # Min cosine similarity
+
+
 class TrackingConfig(BaseModel):
     """Object tracking settings."""
     iou_threshold: float = Field(default=0.3, ge=0.1, le=0.9)
     max_age_seconds: float = Field(default=1.0, ge=0.1, le=10.0)
     depth_history_frames: int = Field(default=30, ge=5, le=100)
+    reid: ReIDConfig = Field(default_factory=ReIDConfig)
 
 
 class DetectionSettings(BaseModel):

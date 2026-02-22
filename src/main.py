@@ -419,11 +419,11 @@ class ReSeeApp:
                             (stereo_width, new_depth_height)
                         )
 
-                        combined_frame = np.vstack((stereo_combined, depth_resized))
+                        left_panel = np.vstack((stereo_combined, depth_resized))
                     else:
-                        combined_frame = stereo_combined
+                        left_panel = stereo_combined
 
-                    # Add bird's eye view if detection is enabled (always show, even with no objects)
+                    # Add bird's eye view NEXT TO the camera feeds (on the right)
                     if self.birdseye_view:
                         # Get camera pose and trajectory if odometry enabled
                         camera_pose = None
@@ -439,15 +439,20 @@ class ReSeeApp:
                             camera_pose=camera_pose,
                             trajectory=trajectory
                         )
-                        # Scale bird's eye view to match combined frame width
-                        combined_width = combined_frame.shape[1]
-                        bev_scale = combined_width / birdseye_frame.shape[1]
-                        bev_height = int(birdseye_frame.shape[0] * bev_scale)
+
+                        # Scale bird's eye view to match left panel HEIGHT (makes it bigger)
+                        left_height = left_panel.shape[0]
+                        bev_scale = left_height / birdseye_frame.shape[0]
+                        bev_width = int(birdseye_frame.shape[1] * bev_scale)
                         birdseye_resized = cv2.resize(
                             birdseye_frame,
-                            (combined_width, bev_height)
+                            (bev_width, left_height)
                         )
-                        combined_frame = np.vstack((combined_frame, birdseye_resized))
+
+                        # Combine horizontally: [cameras+depth | bird's eye]
+                        combined_frame = np.hstack((left_panel, birdseye_resized))
+                    else:
+                        combined_frame = left_panel
 
                     # Create status
                     elapsed = time.time() - start_time
@@ -483,7 +488,9 @@ class ReSeeApp:
                     )
 
         except Exception as e:
+            import traceback
             self.logger.error(f"Error in viewer loop: {e}")
+            self.logger.error(f"Traceback:\n{traceback.format_exc()}")
 
         finally:
             self.running = False

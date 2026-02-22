@@ -25,3 +25,26 @@ tracking:
 
   # Depth history for closing speed calculation
   depth_history_frames: 30
+
+  # ReID (Re-Identification) settings for appearance-based tracking
+  reid:
+    # Enable appearance-based Re-ID matching
+    enabled: true
+
+    # CoreML model path for ReID embedder
+    # Options:
+    #   - models/reid_dinov2.mlpackage (best quality, 224x224, ~21M params)
+    #   - models/reid_mobilenet.mlpackage (faster, 128x128, ~2.5M params)
+    # Run `python scripts/export_reid_dinov2.py` to generate DINOv2 model
+    # Falls back to handcrafted features if model doesn't exist
+    model_path: "models/reid_mobilenet.mlpackage"
+
+    # Embedding dimension (default 256)
+    embedding_dim: 256
+
+    # Weight for ReID score in combined matching (0-1)
+    # Combined score = (1 - weight) * IoU + weight * cosine_similarity
+    weight: 0.4
+
+    # Minimum cosine similarity for ReID matching (lower = easier to match)
+    threshold: 0.4

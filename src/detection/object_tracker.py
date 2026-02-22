@@ -1,19 +1,23 @@
-"""IoU-based object tracking with depth history and closing speed computation."""
+"""IoU-based object tracking with depth history, ReID, and closing speed computation."""
 
+import time
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 
 from .yolo_detector import Detection
 from src.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from .reid_model import ReIDEmbedder
 
 logger = get_logger(__name__)
 
 
 @dataclass
 class TrackedObject:
-    """A tracked object with depth history."""
+    """A tracked object with depth history and appearance embedding."""
     track_id: int
     bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2)
     class_id: int
@@ -23,6 +27,7 @@ class TrackedObject:
     last_seen: float = 0.0  # timestamp
     frames_tracked: int = 0
     closing_speed: float = 0.0  # m/s, positive = approaching
+    embedding: Optional[np.ndarray] = None  # ReID appearance embedding
 
     def get_current_depth(self) -> float:
         """Get most recent depth value, or -1 if no valid depth."""
@@ -33,43 +38,67 @@ class TrackedObject:
 
 class ObjectTracker:
     """
-    IoU-based object tracker with depth history tracking.
+    IoU + ReID object tracker with depth history tracking.
 
-    Tracks objects across frames using Intersection over Union (IoU) matching,
-    maintains depth history for each track, and computes closing speed.
+    Tracks objects across frames using Intersection over Union (IoU) matching
+    combined with appearance-based ReID embeddings. Maintains depth history
+    for each track and computes closing speed.
     """
 
     def __init__(
         self,
         iou_threshold: float = 0.3,
-        max_age_seconds: float = 1.0,
-        depth_history_frames: int = 30
+        max_age_seconds: float = 5.0,  # Keep showing at last position for 5s
+        depth_history_frames: int = 30,
+        reid_model: Optional["ReIDEmbedder"] = None,
+        reid_weight: float = 0.4,  # Give more weight to appearance
+        reid_threshold: float = 0.4,  # Lower = easier to match by appearance
+        graveyard_seconds: float = 60.0,  # Keep dead tracks 60s for resurrection
+        resurrection_threshold: float = 0.40  # ReID similarity to resurrect (lower = easier match)
     ):
         """
         Initialize object tracker.
 
         Args:
             iou_threshold: Minimum IoU for matching detections to tracks.
-            max_age_seconds: Seconds before dropping unseen tracks.
+            max_age_seconds: Seconds before moving tracks to graveyard.
             depth_history_frames: Number of depth samples to keep per track.
+            reid_model: Optional ReID embedding model for appearance matching.
+            reid_weight: Weight for ReID score in combined matching (0-1).
+                         Combined score = (1-reid_weight)*IoU + reid_weight*cosine_sim
+            reid_threshold: Minimum cosine similarity for ReID matching.
+            graveyard_seconds: How long to keep dead tracks for potential resurrection.
+            resurrection_threshold: ReID similarity needed to resurrect a dead track.
         """
         self.iou_threshold = iou_threshold
         self.max_age = max_age_seconds
         self.depth_history_size = depth_history_frames
+        self.reid_model = reid_model
+        self.reid_weight = reid_weight
+        self.reid_threshold = reid_threshold
+        self.graveyard_seconds = graveyard_seconds
+        self.resurrection_threshold = resurrection_threshold
 
         self.tracks: Dict[int, TrackedObject] = {}
         self.next_id: int = 0
 
+        # Graveyard: recently deleted tracks that can be resurrected via ReID
+        # Key: track_id, Value: (TrackedObject, death_timestamp)
+        self._graveyard: Dict[int, Tuple[TrackedObject, float]] = {}
+
+        reid_status = "enabled" if reid_model else "disabled"
         logger.info(
             f"Object tracker initialized (iou={iou_threshold}, "
-            f"max_age={max_age_seconds}s, history={depth_history_frames})"
+            f"max_age={max_age_seconds}s, graveyard={graveyard_seconds}s, "
+            f"reid={reid_status}, reid_weight={reid_weight})"
         )
 
     def update(
         self,
         detections: List[Detection],
         depth_map: Optional[np.ndarray],
-        timestamp: float
+        timestamp: float,
+        frame: Optional[np.ndarray] = None
     ) -> List[TrackedObject]:
         """
         Update tracks with new detections.
@@ -78,14 +107,31 @@ class ObjectTracker:
             detections: List of current frame detections.
             depth_map: Depth map in meters (H x W float32), or None.
             timestamp: Current timestamp (monotonic).
+            frame: BGR image for ReID embedding extraction (optional).
 
         Returns:
             List of active tracked objects.
         """
+        # Extract embeddings for detections if ReID is enabled
+        t_reid_start = time.perf_counter()
+        det_embeddings: List[Optional[np.ndarray]] = []
+        if self.reid_model is not None and frame is not None:
+            for det in detections:
+                emb = self.reid_model.extract(frame, det.bbox)
+                det_embeddings.append(emb)
+        else:
+            det_embeddings = [None] * len(detections)
+        t_reid = (time.perf_counter() - t_reid_start) * 1000
+
         # Match detections to existing tracks
-        matched, unmatched_dets, unmatched_tracks = self._match_detections(detections)
+        t_match_start = time.perf_counter()
+        matched, unmatched_dets, unmatched_tracks = self._match_detections(
+            detections, det_embeddings
+        )
+        t_match = (time.perf_counter() - t_match_start) * 1000
 
         # Update matched tracks
+        t_update_start = time.perf_counter()
         for det_idx, track_id in matched:
             det = detections[det_idx]
             track = self.tracks[track_id]
@@ -94,6 +140,18 @@ class ObjectTracker:
             track.confidence = det.confidence
             track.last_seen = timestamp
             track.frames_tracked += 1
+
+            # Update embedding with exponential moving average
+            if det_embeddings[det_idx] is not None:
+                if track.embedding is None:
+                    track.embedding = det_embeddings[det_idx]
+                else:
+                    # EMA update: 0.7 old + 0.3 new for smooth appearance updates
+                    track.embedding = 0.7 * track.embedding + 0.3 * det_embeddings[det_idx]
+                    # Re-normalize
+                    norm = np.linalg.norm(track.embedding)
+                    if norm > 1e-6:
+                        track.embedding = track.embedding / norm
 
             # Sample depth
             if depth_map is not None:
@@ -104,9 +162,19 @@ class ObjectTracker:
             # Update closing speed
             track.closing_speed = self._compute_closing_speed(track)
 
-        # Create new tracks for unmatched detections
+        # Create new tracks for unmatched detections (or resurrect from graveyard)
         for det_idx in unmatched_dets:
             det = detections[det_idx]
+            det_emb = det_embeddings[det_idx]
+
+            # Try to resurrect from graveyard using ReID
+            resurrected_id = self._try_resurrect(det, det_emb, timestamp)
+
+            if resurrected_id is not None:
+                # Resurrection successful - track already added back to self.tracks
+                continue
+
+            # No resurrection match - create new track
             track = TrackedObject(
                 track_id=self.next_id,
                 bbox=det.bbox,
@@ -115,7 +183,8 @@ class ObjectTracker:
                 confidence=det.confidence,
                 depth_history=deque(maxlen=self.depth_history_size),
                 last_seen=timestamp,
-                frames_tracked=1
+                frames_tracked=1,
+                embedding=det_emb
             )
 
             # Sample initial depth
@@ -127,23 +196,59 @@ class ObjectTracker:
             self.tracks[self.next_id] = track
             self.next_id += 1
 
-        # Remove stale tracks
+        # Move stale tracks to graveyard (don't delete completely)
         stale_ids = [
             tid for tid, track in self.tracks.items()
             if (timestamp - track.last_seen) > self.max_age
         ]
         for tid in stale_ids:
+            track = self.tracks[tid]
+            # Only graveyard if track has embedding for resurrection
+            if track.embedding is not None:
+                self._graveyard[tid] = (track, timestamp)
+                logger.info(f"Track #{tid} ({track.class_name}) moved to graveyard")
             del self.tracks[tid]
+
+        # Clean up old graveyard entries
+        expired_graves = [
+            tid for tid, (track, death_time) in self._graveyard.items()
+            if (timestamp - death_time) > self.graveyard_seconds
+        ]
+        for tid in expired_graves:
+            logger.info(f"Track #{tid} expired from graveyard")
+            del self._graveyard[tid]
+
+        # Merge active tracks with graveyard if they match (handles the case where
+        # a new track was created but it's actually the same as a graveyard track)
+        self._merge_with_graveyard(timestamp)
+
+        t_update = (time.perf_counter() - t_update_start) * 1000
+        t_total = t_reid + t_match + t_update
+
+        # Log detailed timing breakdown for every frame with detections
+        n_dets = len(detections)
+        if n_dets > 0:
+            reid_per_crop = t_reid / n_dets if n_dets > 0 else 0
+            logger.info(
+                f"Tracker: {n_dets} dets, {len(self.tracks)} tracks | "
+                f"reid={t_reid:.1f}ms ({reid_per_crop:.1f}ms/crop), "
+                f"match={t_match:.1f}ms, update={t_update:.1f}ms, "
+                f"total={t_total:.1f}ms"
+            )
 
         # Return active tracks
         return list(self.tracks.values())
 
     def _match_detections(
         self,
-        detections: List[Detection]
+        detections: List[Detection],
+        det_embeddings: Optional[List[Optional[np.ndarray]]] = None
     ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
         """
-        Match detections to existing tracks using IoU.
+        Match detections to existing tracks using IoU + ReID.
+
+        When ReID is enabled, computes a combined score:
+            combined = (1 - reid_weight) * IoU + reid_weight * cosine_similarity
 
         Returns:
             Tuple of (matched pairs, unmatched detection indices, unmatched track ids).
@@ -151,45 +256,244 @@ class ObjectTracker:
         if not detections or not self.tracks:
             return [], list(range(len(detections))), list(self.tracks.keys())
 
-        # Compute IoU matrix
         track_ids = list(self.tracks.keys())
+        use_reid = (
+            self.reid_model is not None and
+            det_embeddings is not None and
+            any(e is not None for e in det_embeddings)
+        )
+
+        # Compute score matrix (IoU or combined IoU + ReID)
+        score_matrix = np.zeros((len(detections), len(track_ids)))
         iou_matrix = np.zeros((len(detections), len(track_ids)))
+        reid_matrix = np.zeros((len(detections), len(track_ids)))
 
         for d_idx, det in enumerate(detections):
             for t_idx, tid in enumerate(track_ids):
                 track = self.tracks[tid]
-                # Only match same class
-                if det.class_id == track.class_id:
-                    iou_matrix[d_idx, t_idx] = self._compute_iou(det.bbox, track.bbox)
 
-        # Greedy matching (could use Hungarian algorithm for optimal matching)
+                # Only match same class
+                if det.class_id != track.class_id:
+                    continue
+
+                # Compute IoU
+                iou = self._compute_iou(det.bbox, track.bbox)
+                iou_matrix[d_idx, t_idx] = iou
+
+                # Compute ReID similarity if available
+                reid_sim = 0.0
+                if use_reid and det_embeddings[d_idx] is not None and track.embedding is not None:
+                    from .reid_model import ReIDEmbedder
+                    reid_sim = ReIDEmbedder.cosine_similarity(
+                        det_embeddings[d_idx], track.embedding
+                    )
+                    # Clamp to [0, 1] range (cosine can be negative)
+                    reid_sim = max(0.0, reid_sim)
+                reid_matrix[d_idx, t_idx] = reid_sim
+
+                # Combined score
+                if use_reid and track.embedding is not None and det_embeddings[d_idx] is not None:
+                    score = (1 - self.reid_weight) * iou + self.reid_weight * reid_sim
+                else:
+                    score = iou
+
+                score_matrix[d_idx, t_idx] = score
+
+        # Greedy matching on combined score
         matched = []
         matched_dets = set()
         matched_tracks = set()
 
         while True:
-            # Find best remaining match
-            if iou_matrix.size == 0:
+            if score_matrix.size == 0:
                 break
 
-            max_iou = np.max(iou_matrix)
-            if max_iou < self.iou_threshold:
+            max_score = np.max(score_matrix)
+
+            # Find best match position
+            d_idx, t_idx = np.unravel_index(np.argmax(score_matrix), score_matrix.shape)
+            iou_val = iou_matrix[d_idx, t_idx]
+            reid_val = reid_matrix[d_idx, t_idx]
+
+            # Check thresholds
+            # Must pass IoU threshold OR have strong ReID match (no IoU required for ReID!)
+            passes_iou = iou_val >= self.iou_threshold
+            passes_reid = use_reid and reid_val >= self.reid_threshold
+            # For very strong ReID matches, allow even with zero IoU (handles rotation/movement)
+            passes_strong_reid = use_reid and reid_val >= 0.55
+
+            if not (passes_iou or passes_reid or passes_strong_reid):
                 break
 
-            d_idx, t_idx = np.unravel_index(np.argmax(iou_matrix), iou_matrix.shape)
+            # If only ReID matched (no IoU), log it
+            if passes_reid and not passes_iou:
+                tid = track_ids[t_idx]
+                logger.info(f"ReID-only match: det→track #{tid} (reid={reid_val:.2f}, iou={iou_val:.2f})")
 
             matched.append((d_idx, track_ids[t_idx]))
             matched_dets.add(d_idx)
             matched_tracks.add(track_ids[t_idx])
 
             # Remove matched row and column
+            score_matrix[d_idx, :] = 0
+            score_matrix[:, t_idx] = 0
             iou_matrix[d_idx, :] = 0
             iou_matrix[:, t_idx] = 0
+            reid_matrix[d_idx, :] = 0
+            reid_matrix[:, t_idx] = 0
 
         unmatched_dets = [i for i in range(len(detections)) if i not in matched_dets]
         unmatched_tracks = [tid for tid in track_ids if tid not in matched_tracks]
 
         return matched, unmatched_dets, unmatched_tracks
+
+    def _try_resurrect(
+        self,
+        det: Detection,
+        det_embedding: Optional[np.ndarray],
+        timestamp: float
+    ) -> Optional[int]:
+        """
+        Try to resurrect a track from the graveyard using ReID matching.
+
+        This handles occlusion: when an object reappears after being hidden,
+        we match it back to its original track ID instead of creating a new one.
+
+        Args:
+            det: The unmatched detection.
+            det_embedding: Embedding for the detection (may be None).
+            timestamp: Current timestamp.
+
+        Returns:
+            Track ID if resurrected, None otherwise.
+        """
+        if det_embedding is None or not self._graveyard:
+            return None
+
+        best_match_id: Optional[int] = None
+        best_similarity = self.resurrection_threshold
+
+        for tid, (dead_track, death_time) in self._graveyard.items():
+            # Must be same class
+            if dead_track.class_id != det.class_id:
+                continue
+
+            # Must have embedding
+            if dead_track.embedding is None:
+                continue
+
+            # Compute cosine similarity
+            similarity = float(np.dot(det_embedding, dead_track.embedding))
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match_id = tid
+
+        if best_match_id is not None:
+            # Resurrect the track!
+            dead_track, death_time = self._graveyard[best_match_id]
+
+            # Update track with new detection info
+            dead_track.bbox = det.bbox
+            dead_track.confidence = det.confidence
+            dead_track.last_seen = timestamp
+            dead_track.frames_tracked += 1
+
+            # Update embedding with EMA
+            dead_track.embedding = 0.7 * dead_track.embedding + 0.3 * det_embedding
+            norm = np.linalg.norm(dead_track.embedding)
+            if norm > 1e-6:
+                dead_track.embedding = dead_track.embedding / norm
+
+            # Move back to active tracks
+            self.tracks[best_match_id] = dead_track
+            del self._graveyard[best_match_id]
+
+            time_dead = timestamp - death_time
+            logger.info(
+                f"RESURRECTED track #{best_match_id} ({dead_track.class_name}) "
+                f"after {time_dead:.1f}s (similarity={best_similarity:.3f})"
+            )
+
+            return best_match_id
+
+        return None
+
+    def _merge_with_graveyard(self, timestamp: float) -> None:
+        """
+        Check if any active tracks should be merged with graveyard tracks.
+
+        This handles the case where:
+        1. Object A is tracked as #1
+        2. We look away, #1 goes to graveyard
+        3. We see object A again from different angle, creates #2
+        4. Now #1 (graveyard) and #2 (active) are the same object
+
+        We merge by keeping the older (graveyard) ID and deleting the newer one.
+        """
+        if not self._graveyard:
+            return
+
+        merge_threshold = 0.5  # Similarity needed to merge
+
+        # Find merges: active track → graveyard track
+        merges: List[Tuple[int, int, float]] = []  # (active_id, grave_id, similarity)
+
+        for active_id, active_track in self.tracks.items():
+            if active_track.embedding is None:
+                continue
+
+            for grave_id, (grave_track, death_time) in self._graveyard.items():
+                # Must be same class
+                if active_track.class_id != grave_track.class_id:
+                    continue
+
+                if grave_track.embedding is None:
+                    continue
+
+                # Compute similarity
+                similarity = float(np.dot(active_track.embedding, grave_track.embedding))
+
+                if similarity >= merge_threshold:
+                    merges.append((active_id, grave_id, similarity))
+
+        # Apply merges (keep older graveyard ID, delete newer active ID)
+        merged_active_ids: Set[int] = set()
+        merged_grave_ids: Set[int] = set()
+        for active_id, grave_id, similarity in merges:
+            if active_id in merged_active_ids:
+                continue  # Already merged
+            if grave_id in merged_grave_ids:
+                continue  # Graveyard entry already merged
+
+            # Get the active track's current state
+            active_track = self.tracks[active_id]
+            grave_track, death_time = self._graveyard[grave_id]
+
+            # Update graveyard track with active track's position
+            grave_track.bbox = active_track.bbox
+            grave_track.confidence = active_track.confidence
+            grave_track.last_seen = timestamp
+            grave_track.frames_tracked += active_track.frames_tracked
+
+            # Merge embeddings
+            grave_track.embedding = 0.5 * grave_track.embedding + 0.5 * active_track.embedding
+            norm = np.linalg.norm(grave_track.embedding)
+            if norm > 1e-6:
+                grave_track.embedding = grave_track.embedding / norm
+
+            # Move graveyard track back to active, delete the newer track
+            self.tracks[grave_id] = grave_track
+            del self.tracks[active_id]
+            del self._graveyard[grave_id]
+
+            merged_active_ids.add(active_id)
+            merged_grave_ids.add(grave_id)
+
+            logger.info(
+                f"MERGED track #{active_id} into #{grave_id} ({grave_track.class_name}) "
+                f"(similarity={similarity:.3f})"
+            )
 
     @staticmethod
     def _compute_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:

@@ -168,9 +168,46 @@ pip autoremove -y 2>/dev/null || true
 
 echo -e "${GREEN}Dependencies installed successfully!${NC}"
 
+# Check if ReID model needs to be exported
+echo ""
+echo -e "${BLUE}Step 4: Checking ML models...${NC}"
+
+REID_MODEL_DINO="models/reid_dinov2.mlpackage"
+REID_MODEL_MOBILE="models/reid_mobilenet.mlpackage"
+
+if [ ! -d "$REID_MODEL_DINO" ] && [ ! -d "$REID_MODEL_MOBILE" ]; then
+    echo -e "${YELLOW}ReID model not found. Exporting DINOv2-Small...${NC}"
+    echo "This is a one-time setup that requires PyTorch (~2-3 minutes)."
+    echo ""
+
+    # Install PyTorch temporarily for export
+    echo "Installing PyTorch (temporary, for export only)..."
+    pip install torch torchvision --quiet
+
+    # Run the export script
+    echo "Exporting DINOv2 ReID model to CoreML..."
+    python scripts/export_reid_dinov2.py
+
+    if [ -d "$REID_MODEL_DINO" ]; then
+        echo -e "${GREEN}DINOv2 ReID model exported successfully!${NC}"
+
+        # Uninstall PyTorch to keep runtime lean
+        echo "Removing PyTorch (no longer needed at runtime)..."
+        pip uninstall torch torchvision -y --quiet 2>/dev/null || true
+    else
+        echo -e "${YELLOW}WARNING: ReID model export failed. Will use handcrafted features.${NC}"
+    fi
+else
+    if [ -d "$REID_MODEL_DINO" ]; then
+        echo -e "${GREEN}DINOv2 ReID model already exists.${NC}"
+    else
+        echo -e "${GREEN}MobileNet ReID model already exists.${NC}"
+    fi
+fi
+
 # Check if .env exists
 echo ""
-echo -e "${BLUE}Step 4: Checking configuration...${NC}"
+echo -e "${BLUE}Step 5: Checking configuration...${NC}"
 
 if [ ! -f ".env" ]; then
     echo ""
@@ -185,7 +222,7 @@ fi
 
 # Run the application
 echo ""
-echo -e "${GREEN}Step 5: Starting ReSee...${NC}"
+echo -e "${GREEN}Step 6: Starting ReSee...${NC}"
 echo "========================================"
 echo ""
 echo "CLI options: --recalibrate (force calibration), --no-depth (disable depth)"
