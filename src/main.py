@@ -6,6 +6,7 @@ Compatible with macOS, Linux, and Raspberry Pi.
 """
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -22,6 +23,7 @@ from src.camera.stereo_capture import StereoCamera, StereoCameraError
 from src.camera.display import VideoDisplay
 from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
 from src.odometry import VisualOdometry, WorldState
+from src.gemini.navigator import GeminiNavigator
 
 
 def parse_args():
@@ -44,13 +46,24 @@ def parse_args():
         action='store_true',
         help='Disable object detection'
     )
+    parser.add_argument(
+        '--no-navigation',
+        action='store_true',
+        help='Disable Gemini navigation assistance'
+    )
     return parser.parse_args()
 
 
 class ReSeeApp:
     """Stereo camera viewer application with depth estimation."""
 
-    def __init__(self, recalibrate: bool = False, no_depth: bool = False, no_detection: bool = False):
+    def __init__(
+        self,
+        recalibrate: bool = False,
+        no_depth: bool = False,
+        no_detection: bool = False,
+        no_navigation: bool = False
+    ):
         """
         Initialize ReSee camera viewer.
 
@@ -58,11 +71,13 @@ class ReSeeApp:
             recalibrate: Force recalibration even if data exists.
             no_depth: Disable depth estimation.
             no_detection: Disable object detection.
+            no_navigation: Disable Gemini navigation assistance.
         """
         # CLI options
         self.recalibrate = recalibrate
         self.no_depth = no_depth
         self.no_detection = no_detection
+        self.no_navigation = no_navigation
 
         # Load configuration
         self.settings = get_settings()
@@ -87,6 +102,7 @@ class ReSeeApp:
         self.birdseye_view = None  # Initialized in initialize()
         self.visual_odometry: Optional[VisualOdometry] = None
         self.world_state: Optional[WorldState] = None
+        self.navigator: Optional[GeminiNavigator] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -97,6 +113,7 @@ class ReSeeApp:
         self.depth_enabled = False
         self.detection_enabled = False
         self.odometry_enabled = False
+        self.navigation_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -172,6 +189,9 @@ class ReSeeApp:
                     self.logger.info("Bird's eye view enabled")
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
+
+            # Initialize navigation assistant if available
+            self._initialize_navigation()
 
             self.logger.info("All components initialized successfully")
             return True
@@ -318,6 +338,36 @@ class ReSeeApp:
             self.logger.error(f"Failed to initialize detection: {e}")
             return False
 
+    def _initialize_navigation(self) -> bool:
+        """
+        Initialize Gemini navigation assistant.
+
+        Returns:
+            True if navigation is ready, False otherwise.
+        """
+        if self.no_navigation:
+            self.logger.info("Navigation disabled by --no-navigation flag")
+            return False
+
+        api_key = os.environ.get('GEMINI_API_KEY')
+        if not api_key:
+            self.logger.info("Navigation disabled (GEMINI_API_KEY not set)")
+            return False
+
+        try:
+            self.navigator = GeminiNavigator(
+                api_key=api_key,
+                routine_interval=1.0,
+                danger_zone_m=5.0,
+                closing_speed_threshold=0.5
+            )
+            self.navigation_enabled = True
+            self.logger.info("Gemini navigation enabled")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize navigation: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -335,6 +385,10 @@ class ReSeeApp:
             self.logger.info("Visual odometry: ENABLED")
         else:
             self.logger.info("Visual odometry: DISABLED")
+        if self.navigation_enabled:
+            self.logger.info("Navigation assistant: ENABLED")
+        else:
+            self.logger.info("Navigation assistant: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         if self.odometry_enabled:
             self.logger.info("Press 'R' to reset odometry")
@@ -381,6 +435,7 @@ class ReSeeApp:
 
                     # Process depth if enabled
                     depth_map = None
+                    depth_colored = None
                     if self.depth_enabled and self.depth_estimator:
                         depth_colored, depth_map = self.depth_estimator.process_frame(
                             left_resized, right_resized, include_legend=True
@@ -401,6 +456,15 @@ class ReSeeApp:
                     if self.detection_enabled and self.detection_pipeline:
                         left_resized, tracks = self.detection_pipeline.process(
                             left_resized, depth_map
+                        )
+
+                    # Process navigation assistance if enabled
+                    if self.navigation_enabled and self.navigator:
+                        self.navigator.process_frame(
+                            left_frame=left_resized,
+                            depth_colored=depth_colored if self.depth_enabled else None,
+                            tracks=tracks,
+                            timestamp=time.monotonic()
                         )
 
                     # Combine side-by-side for stereo view
@@ -510,6 +574,10 @@ class ReSeeApp:
         """Cleanup all resources."""
         self.logger.info("Cleaning up resources...")
 
+        # Shutdown navigator
+        if self.navigator:
+            self.navigator.shutdown()
+
         # Close display
         if self.display:
             self.display.close()
@@ -562,7 +630,8 @@ def main() -> int:
     app = ReSeeApp(
         recalibrate=args.recalibrate,
         no_depth=args.no_depth,
-        no_detection=args.no_detection
+        no_detection=args.no_detection,
+        no_navigation=args.no_navigation
     )
     return app.run()
 

@@ -1,7 +1,7 @@
 """Simple REST API client for Gemini 2.5 Flash Lite."""
 
 import base64
-from typing import Optional
+from typing import Optional, Tuple
 from google import genai
 from google.genai import types
 from src.utils.logger import get_logger
@@ -143,6 +143,66 @@ class GeminiClient:
                     return None
 
         return None
+
+    def generate_text(self, prompt: str) -> Optional[str]:
+        """
+        Generate text response (no image).
+
+        Args:
+            prompt: Text prompt.
+
+        Returns:
+            Text response from Gemini, or None if failed.
+        """
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt
+            )
+
+            if response and response.text:
+                logger.debug(f"Received response ({len(response.text)} chars)")
+                return response.text
+            else:
+                logger.warning("Empty response from Gemini")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error generating text: {e}")
+            return None
+
+    def generate_text_with_retry(self, prompt: str) -> Tuple[Optional[str], float]:
+        """
+        Generate text with automatic retry on failure.
+
+        Args:
+            prompt: Text prompt.
+
+        Returns:
+            Tuple of (response text, elapsed_ms).
+        """
+        import time
+        start_time = time.time()
+
+        for attempt in range(self.max_retries):
+            try:
+                result = self.generate_text(prompt)
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                if result:
+                    return result, elapsed_ms
+
+                logger.warning(f"Attempt {attempt + 1}/{self.max_retries} returned empty result")
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{self.max_retries} failed: {e}")
+
+                if attempt < self.max_retries - 1:
+                    logger.info("Retrying...")
+                    continue
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        return None, elapsed_ms
 
     def is_available(self) -> bool:
         """

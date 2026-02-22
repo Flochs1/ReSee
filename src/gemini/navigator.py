@@ -35,62 +35,345 @@ class TriggerInfo:
 
 
 @dataclass
+class ZoneInfo:
+    """Zone clearance information."""
+    clear: bool = True
+    nearest_dist: float = float('inf')
+    nearest_obj: Optional[str] = None
+
+
+# Stationary objects that can be used to detect user motion (cannot move on their own)
+STATIONARY_CLASSES = {
+    # Street furniture
+    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench',
+    # Indoor furniture
+    'chair', 'couch', 'bed', 'dining table', 'desk', 'toilet', 'sink',
+    # Appliances
+    'tv', 'refrigerator', 'oven', 'microwave', 'toaster',
+    # Fixed structures
+    'door', 'window', 'building', 'wall', 'fence', 'pole',
+    # Nature (rooted)
+    'tree', 'plant', 'potted plant',
+    # Other immobile objects
+    'clock', 'vase', 'laptop', 'keyboard', 'mouse', 'book', 'backpack',
+    'suitcase', 'handbag', 'umbrella', 'bottle', 'cup', 'bowl'
+}
+
+# Mobile objects that CAN move towards us (potential collision hazards)
+MOBILE_CLASSES = {
+    # People
+    'person',
+    # Vehicles
+    'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'airplane', 'boat',
+    # Animals
+    'dog', 'cat', 'horse', 'cow', 'sheep', 'bird', 'bear', 'zebra', 'giraffe', 'elephant',
+    # Sports equipment (in motion)
+    'sports ball', 'frisbee', 'skateboard', 'skis', 'snowboard', 'surfboard'
+}
+
+
+@dataclass
 class NavigationContext:
     """Context about the current navigation state."""
     is_moving: bool
-    motion_score: float
-    left_clear: bool
-    right_clear: bool
-    center_clear: bool
+    motion_magnitude: float
+    motion_direction: str  # 'forward', 'backward', 'stationary'
+    user_speed: float  # User's movement speed in m/s (positive = moving forward)
+    left_zone: ZoneInfo
+    center_zone: ZoneInfo
+    right_zone: ZoneInfo
 
 
-class MotionDetector:
-    """Detects camera/user motion using frame differencing."""
+class StationaryObjectMotionDetector:
+    """
+    Detects user motion by tracking depth changes in stationary objects.
 
-    def __init__(self, history_size: int = 10, motion_threshold: float = 5.0):
+    If multiple stationary objects show consistent depth changes (all getting
+    closer or farther), it indicates the user is moving.
+    """
+
+    def __init__(self, history_size: int = 10, depth_change_threshold: float = 0.1):
         """
-        Initialize motion detector.
+        Initialize stationary object motion detector.
 
         Args:
-            history_size: Number of frames to track.
-            motion_threshold: Pixel movement threshold to consider "moving".
+            history_size: Number of depth samples to track per object.
+            depth_change_threshold: Minimum depth change (m/s) to consider motion.
         """
         self.history_size = history_size
-        self.motion_threshold = motion_threshold
-        self.prev_gray: Optional[np.ndarray] = None
-        self.motion_history: deque = deque(maxlen=history_size)
+        self.depth_change_threshold = depth_change_threshold
+        # track_id -> deque of (timestamp, depth)
+        self.depth_history: dict = {}
+        self.last_timestamp: float = 0.0
 
-    def update(self, frame: np.ndarray) -> Tuple[bool, float]:
+    def update(
+        self,
+        tracks: List,
+        timestamp: float
+    ) -> Tuple[bool, float, str, float]:
         """
-        Update motion detector with new frame.
+        Update motion detector with tracked objects.
 
         Args:
-            frame: BGR frame from camera.
+            tracks: List of TrackedObject from detection pipeline.
+            timestamp: Current timestamp.
 
         Returns:
-            Tuple of (is_moving, average_motion).
+            Tuple of (is_moving, motion_magnitude, direction, user_speed).
+            direction is 'forward', 'backward', or 'stationary'.
+            user_speed is in m/s (positive = moving forward).
         """
-        # Convert to grayscale and downsample for speed
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (160, 120))
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+        dt = timestamp - self.last_timestamp if self.last_timestamp > 0 else 0.1
+        self.last_timestamp = timestamp
 
-        if self.prev_gray is None:
-            self.prev_gray = gray
-            return False, 0.0
+        # Track depth changes for stationary objects
+        depth_changes = []
 
-        # Calculate frame difference
-        diff = cv2.absdiff(self.prev_gray, gray)
-        motion_score = np.mean(diff)
+        for track in tracks:
+            # Only use stationary objects
+            if track.class_name.lower() not in STATIONARY_CLASSES:
+                continue
 
-        self.motion_history.append(motion_score)
-        self.prev_gray = gray
+            depth = track.get_current_depth()
+            if depth <= 0 or depth > 20.0:  # Invalid or too far
+                continue
 
-        # Average motion over history
-        avg_motion = np.mean(self.motion_history) if self.motion_history else 0.0
-        is_moving = avg_motion > self.motion_threshold
+            track_id = track.track_id
 
-        return is_moving, avg_motion
+            # Initialize history for new tracks
+            if track_id not in self.depth_history:
+                self.depth_history[track_id] = deque(maxlen=self.history_size)
+
+            history = self.depth_history[track_id]
+
+            # Calculate depth change rate if we have history
+            if len(history) >= 2:
+                old_time, old_depth = history[0]
+                time_diff = timestamp - old_time
+                if time_diff > 0.05:  # At least 50ms
+                    depth_change_rate = (depth - old_depth) / time_diff
+                    depth_changes.append(depth_change_rate)
+
+            history.append((timestamp, depth))
+
+        # Clean up old tracks
+        active_ids = {t.track_id for t in tracks}
+        self.depth_history = {
+            tid: hist for tid, hist in self.depth_history.items()
+            if tid in active_ids
+        }
+
+        if len(depth_changes) < 2:
+            return False, 0.0, 'stationary', 0.0
+
+        # Check if majority of stationary objects show consistent motion
+        avg_change = np.mean(depth_changes)
+        std_change = np.std(depth_changes)
+
+        # Motion is detected if changes are consistent (low std) and significant
+        is_consistent = std_change < abs(avg_change) * 0.5 + 0.1
+        is_significant = abs(avg_change) > self.depth_change_threshold
+
+        is_moving = is_consistent and is_significant
+
+        # User speed: negative depth change = objects getting closer = user moving forward
+        # So user_speed = -avg_change (positive when moving forward)
+        user_speed = -avg_change if is_moving else 0.0
+
+        if not is_moving:
+            return False, 0.0, 'stationary', 0.0
+
+        # Negative change = objects getting closer = user moving forward
+        if avg_change < 0:
+            direction = 'forward'
+        else:
+            direction = 'backward'
+
+        return is_moving, abs(avg_change), direction, user_speed
+
+
+class RelativeApproachTracker:
+    """
+    Tracks relative approaching behavior of mobile objects.
+
+    Calculates relative speed = object closing speed - user speed.
+    Only mobile objects (people, vehicles, animals) are considered threats.
+    Objects that haven't changed in 3 frames are ignored.
+    """
+
+    def __init__(self, history_size: int = 10):
+        """
+        Initialize relative approach tracker.
+
+        Args:
+            history_size: Number of samples to track per object.
+        """
+        self.history_size = history_size
+        # track_id -> deque of (closing_speed, depth, user_speed)
+        self.track_history: dict = {}
+
+    def update(self, tracks: List, user_speed: float) -> None:
+        """
+        Update approach tracker with current tracks and user speed.
+
+        Args:
+            tracks: List of TrackedObject from detection pipeline.
+            user_speed: User's movement speed in m/s (positive = forward).
+        """
+        active_ids = set()
+
+        for track in tracks:
+            track_id = track.track_id
+            active_ids.add(track_id)
+
+            if track_id not in self.track_history:
+                self.track_history[track_id] = deque(maxlen=self.history_size)
+
+            depth = track.get_current_depth()
+            self.track_history[track_id].append({
+                'closing_speed': track.closing_speed,
+                'depth': depth,
+                'user_speed': user_speed,
+                'class_name': track.class_name
+            })
+
+        # Clean up old tracks
+        self.track_history = {
+            tid: hist for tid, hist in self.track_history.items()
+            if tid in active_ids
+        }
+
+    def get_relative_speed(self, track_id: int) -> float:
+        """
+        Get the relative approach speed of an object.
+
+        Relative speed = object closing speed - user speed.
+        Positive = object moving towards us faster than we're moving towards it.
+
+        Args:
+            track_id: The track ID to check.
+
+        Returns:
+            Relative approach speed in m/s, or 0.0 if unknown.
+        """
+        if track_id not in self.track_history:
+            return 0.0
+
+        history = self.track_history[track_id]
+        if not history:
+            return 0.0
+
+        # Use most recent sample
+        latest = history[-1]
+        closing_speed = latest['closing_speed']
+        user_speed = latest['user_speed']
+
+        # Relative speed: how fast object approaches us beyond our own movement
+        # closing_speed is positive when object gets closer
+        # user_speed is positive when we move forward (towards objects)
+        # If we're moving at 0.5 m/s and object closes at 0.5 m/s, relative = 0
+        # If we're moving at 0.3 m/s and object closes at 0.8 m/s, relative = 0.5 (it's moving towards us)
+        relative_speed = closing_speed - user_speed
+
+        return relative_speed
+
+    def has_changed_recently(self, track_id: int, min_change: float = 0.1) -> bool:
+        """
+        Check if object's depth has changed meaningfully in last 3 samples.
+
+        Args:
+            track_id: The track ID to check.
+            min_change: Minimum depth change to consider "changed" (meters).
+
+        Returns:
+            True if depth has changed, False if stable.
+        """
+        if track_id not in self.track_history:
+            return False
+
+        history = list(self.track_history[track_id])
+        if len(history) < 3:
+            return True  # Not enough data, assume it could be changing
+
+        # Check last 3 samples
+        recent = history[-3:]
+        depths = [s['depth'] for s in recent if s['depth'] > 0]
+
+        if len(depths) < 2:
+            return True  # Not enough valid depth data
+
+        # Check if depth has changed
+        depth_range = max(depths) - min(depths)
+        return depth_range > min_change
+
+    def is_mobile_object(self, track_id: int) -> bool:
+        """
+        Check if the tracked object is a mobile class (can move on its own).
+
+        Args:
+            track_id: The track ID to check.
+
+        Returns:
+            True if object is mobile (person, vehicle, animal).
+        """
+        if track_id not in self.track_history:
+            return False
+
+        history = self.track_history[track_id]
+        if not history:
+            return False
+
+        class_name = history[-1]['class_name'].lower()
+        return class_name in MOBILE_CLASSES
+
+    def is_actively_approaching(
+        self,
+        track_id: int,
+        threshold: float = 0.2,
+        min_samples: int = 3
+    ) -> bool:
+        """
+        Check if a mobile object is actively approaching us.
+
+        Only returns True if:
+        1. Object is a mobile class (can move on its own)
+        2. Object has changed position in last 3 frames
+        3. Relative speed is above threshold for recent samples
+
+        Args:
+            track_id: The track ID to check.
+            threshold: Minimum relative speed to consider approaching (m/s).
+            min_samples: Minimum number of samples required.
+
+        Returns:
+            True if object is actively approaching.
+        """
+        # Must be a mobile object
+        if not self.is_mobile_object(track_id):
+            return False
+
+        # Must have changed recently (not static)
+        if not self.has_changed_recently(track_id):
+            return False
+
+        if track_id not in self.track_history:
+            return False
+
+        history = list(self.track_history[track_id])
+        if len(history) < min_samples:
+            return False
+
+        # Check relative speed for recent samples
+        recent = history[-min_samples:]
+        for sample in recent:
+            closing_speed = sample['closing_speed']
+            user_speed = sample['user_speed']
+            relative_speed = closing_speed - user_speed
+
+            if relative_speed < threshold:
+                return False  # Not consistently approaching
+
+        return True
 
 
 class GeminiNavigator:
@@ -110,7 +393,7 @@ class GeminiNavigator:
         api_key: str,
         user_goal: str = "moving forward",
         routine_interval: float = 1.0,
-        danger_zone_m: float = 1.0,
+        danger_zone_m: float = 5.0,
         closing_speed_threshold: float = 0.5
     ):
         """
@@ -120,10 +403,10 @@ class GeminiNavigator:
             api_key: Gemini API key.
             user_goal: Description of user's current navigation goal.
             routine_interval: Seconds between routine updates.
-            danger_zone_m: Distance threshold for immediate alerts (meters).
+            danger_zone_m: Distance threshold for alerts when moving (meters).
             closing_speed_threshold: Approaching speed for immediate alerts (m/s).
         """
-        self.client = GeminiClient(api_key=api_key, max_history=2)
+        self.client = GeminiClient(api_key=api_key)
         self.user_goal = user_goal
         self.routine_interval = routine_interval
 
@@ -134,18 +417,25 @@ class GeminiNavigator:
         self.left_zone = (0.0, 0.33)
         self.right_zone = (0.67, 1.0)
 
-        # Motion detection
-        self.motion_detector = MotionDetector()
+        # Motion detection using stationary objects
+        self.motion_detector = StationaryObjectMotionDetector()
+        self.approach_tracker = RelativeApproachTracker()
         self.nav_context = NavigationContext(
             is_moving=False,
-            motion_score=0.0,
-            left_clear=True,
-            right_clear=True,
-            center_clear=True
+            motion_magnitude=0.0,
+            motion_direction='stationary',
+            user_speed=0.0,
+            left_zone=ZoneInfo(),
+            center_zone=ZoneInfo(),
+            right_zone=ZoneInfo()
         )
 
         # Timing
         self.last_call_time = 0.0
+
+        # History tracking (last 3 frames/responses)
+        self.object_history: deque = deque(maxlen=3)  # List of object descriptions per frame
+        self.situation_history: deque = deque(maxlen=3)  # Previous Gemini responses
 
         # Background execution (non-blocking)
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -175,31 +465,46 @@ class GeminiNavigator:
         """Check if object is in the navigation path (center of frame)."""
         return self._get_zone(bbox, frame_width) == "center"
 
-    def _analyze_clearance(self, tracks: List, frame_width: int) -> Tuple[bool, bool, bool]:
+    def _analyze_clearance(
+        self,
+        tracks: List,
+        frame_width: int
+    ) -> Tuple[ZoneInfo, ZoneInfo, ZoneInfo]:
         """
-        Analyze which zones are clear for dodging.
+        Analyze zone clearance with nearest object information.
 
         Returns:
-            Tuple of (left_clear, right_clear, center_clear).
+            Tuple of (left_zone, center_zone, right_zone) ZoneInfo objects.
         """
-        left_clear = True
-        right_clear = True
-        center_clear = True
+        left_zone = ZoneInfo()
+        center_zone = ZoneInfo()
+        right_zone = ZoneInfo()
 
         for track in tracks:
-            zone = self._get_zone(track.bbox, frame_width)
+            zone_name = self._get_zone(track.bbox, frame_width)
             depth = track.get_current_depth()
 
-            # Only consider objects within 3m as blocking
-            if depth > 0 and depth < 3.0:
-                if zone == "left":
-                    left_clear = False
-                elif zone == "right":
-                    right_clear = False
-                else:
-                    center_clear = False
+            if depth <= 0:
+                continue
 
-        return left_clear, right_clear, center_clear
+            # Select the appropriate zone
+            if zone_name == "left":
+                zone = left_zone
+            elif zone_name == "right":
+                zone = right_zone
+            else:
+                zone = center_zone
+
+            # Update zone with nearest object
+            if depth < zone.nearest_dist:
+                zone.nearest_dist = depth
+                zone.nearest_obj = track.class_name
+
+            # Consider objects within danger zone as blocking
+            if depth < self.danger_zone_m:
+                zone.clear = False
+
+        return left_zone, center_zone, right_zone
 
     def check_trigger(
         self,
@@ -210,6 +515,11 @@ class GeminiNavigator:
         """
         Check if we should trigger a Gemini call.
 
+        Trigger conditions:
+        1. DANGER_CLOSE: User is moving AND object in center zone < danger_zone_m
+        2. DANGER_APPROACHING: Object is persistently approaching AND in center zone
+        3. ROUTINE: 1-second interval for regular updates
+
         Args:
             tracks: List of TrackedObject from detection pipeline.
             frame_width: Width of the frame for path calculation.
@@ -218,30 +528,52 @@ class GeminiNavigator:
         Returns:
             Tuple of (should_trigger, TriggerInfo or None).
         """
-        # Check for immediate danger triggers (objects in path)
+        ctx = self.nav_context
+
+        # Check for DANGER_CLOSE: User moving + obstacle in path within danger zone
+        if ctx.is_moving and ctx.motion_direction == 'forward':
+            if not ctx.center_zone.clear:
+                return True, TriggerInfo(
+                    trigger_type=TriggerType.DANGER_CLOSE,
+                    reason=f"{ctx.center_zone.nearest_obj} in path while moving",
+                    object_name=ctx.center_zone.nearest_obj,
+                    distance=ctx.center_zone.nearest_dist
+                )
+
+        # Check for DANGER_APPROACHING: Mobile object actively approaching in center
         for track in tracks:
             if not self.is_in_path(track.bbox, frame_width):
                 continue
 
             depth = track.get_current_depth()
+            if depth <= 0:
+                continue
 
-            # Object too close
-            if depth > 0 and depth < self.danger_zone_m:
+            # Only consider mobile objects (people, vehicles, animals)
+            if track.class_name.lower() not in MOBILE_CLASSES:
+                continue
+
+            # Get relative approach speed (accounts for our own movement)
+            relative_speed = self.approach_tracker.get_relative_speed(track.track_id)
+
+            # Check if object is actively approaching (mobile, changed recently, consistent)
+            if self.approach_tracker.is_actively_approaching(track.track_id):
                 return True, TriggerInfo(
-                    trigger_type=TriggerType.DANGER_CLOSE,
-                    reason=f"{track.class_name} too close",
+                    trigger_type=TriggerType.DANGER_APPROACHING,
+                    reason=f"{track.class_name} actively approaching",
                     object_name=track.class_name,
-                    distance=depth
+                    distance=depth,
+                    speed=relative_speed
                 )
 
-            # Object approaching fast
-            if track.closing_speed > self.closing_speed_threshold:
+            # Also trigger for fast relative approach (even if not persistent yet)
+            if relative_speed > self.closing_speed_threshold:
                 return True, TriggerInfo(
                     trigger_type=TriggerType.DANGER_APPROACHING,
                     reason=f"{track.class_name} approaching fast",
                     object_name=track.class_name,
                     distance=depth,
-                    speed=track.closing_speed
+                    speed=relative_speed
                 )
 
         # Routine trigger
@@ -253,6 +585,36 @@ class GeminiNavigator:
 
         return False, None
 
+    def _format_zone_status(self, zone: ZoneInfo, zone_name: str) -> str:
+        """Format zone status for prompt."""
+        if zone.clear:
+            if zone.nearest_dist < float('inf'):
+                return f"{zone_name}: clear (nearest: {zone.nearest_obj} at {zone.nearest_dist:.1f}m)"
+            return f"{zone_name}: clear"
+        else:
+            return f"{zone_name}: {zone.nearest_obj} at {zone.nearest_dist:.1f}m"
+
+    def _format_objects_for_history(self, tracks: List, frame_width: int) -> str:
+        """Format current objects for history storage."""
+        if not tracks:
+            return "No objects detected"
+
+        lines = []
+        for track in tracks:
+            zone = self._get_zone(track.bbox, frame_width)
+            depth = track.get_current_depth()
+            depth_str = f"{depth:.1f}m" if depth > 0 else "?"
+
+            speed_str = ""
+            if track.closing_speed > 0.1:
+                speed_str = f" approaching"
+            elif track.closing_speed < -0.1:
+                speed_str = f" receding"
+
+            lines.append(f"{track.class_name} ({zone}, {depth_str}{speed_str})")
+
+        return ", ".join(lines)
+
     def build_prompt(
         self,
         trigger: TriggerInfo,
@@ -260,7 +622,7 @@ class GeminiNavigator:
         frame_width: int
     ) -> str:
         """
-        Build context-aware prompt for Gemini.
+        Build context-aware prompt for Gemini (text only, no image).
 
         Args:
             trigger: Trigger information.
@@ -272,80 +634,71 @@ class GeminiNavigator:
         """
         ctx = self.nav_context
 
-        # Build object descriptions
-        object_lines = []
-        for track in tracks:
-            zone = self._get_zone(track.bbox, frame_width)
-            in_path = "BLOCKING PATH" if zone == "center" else f"on {zone}"
-            depth = track.get_current_depth()
-            depth_str = f"{depth:.1f}m" if depth > 0 else "unknown"
-
-            speed_str = ""
-            if track.closing_speed > 0.1:
-                speed_str = f", approaching {track.closing_speed:.1f}m/s"
-            elif track.closing_speed < -0.1:
-                speed_str = f", moving away"
-
-            object_lines.append(
-                f"- {track.class_name}: {depth_str}, {in_path}{speed_str}"
-            )
-
-        objects_text = "\n".join(object_lines) if object_lines else "- None detected"
-
-        # Motion and clearance status
-        motion_status = "MOVING" if ctx.is_moving else "STATIONARY"
-
-        clearance_parts = []
-        if ctx.left_clear:
-            clearance_parts.append("LEFT CLEAR")
+        # Motion status
+        if ctx.is_moving:
+            motion_status = f"Moving {ctx.motion_direction}"
         else:
-            clearance_parts.append("LEFT BLOCKED")
-        if ctx.right_clear:
-            clearance_parts.append("RIGHT CLEAR")
-        else:
-            clearance_parts.append("RIGHT BLOCKED")
-        if ctx.center_clear:
-            clearance_parts.append("PATH CLEAR")
-        else:
-            clearance_parts.append("PATH BLOCKED")
+            motion_status = "Stationary"
 
-        clearance_status = " | ".join(clearance_parts)
-
-        # Trigger description
+        # Reason for call
         if trigger.trigger_type == TriggerType.DANGER_CLOSE:
-            trigger_desc = f"DANGER: {trigger.object_name} at {trigger.distance:.1f}m - IMMEDIATE THREAT"
+            reason = f"Warning: {trigger.object_name} at {trigger.distance:.1f}m ahead"
         elif trigger.trigger_type == TriggerType.DANGER_APPROACHING:
-            trigger_desc = f"DANGER: {trigger.object_name} approaching at {trigger.speed:.1f}m/s from {trigger.distance:.1f}m"
+            reason = f"Warning: {trigger.object_name} approaching"
         else:
-            trigger_desc = "ROUTINE: Scheduled situational update"
+            reason = "Routine update"
 
-        prompt = f"""You are a real-time navigation assistant for a visually impaired person. You have context from previous frames.
+        # Current zone status
+        zone_status = f"Left: {self._format_zone_status(ctx.left_zone, 'L')}, Center: {self._format_zone_status(ctx.center_zone, 'C')}, Right: {self._format_zone_status(ctx.right_zone, 'R')}"
+
+        # Build history context
+        history_text = ""
+        if self.object_history:
+            history_lines = []
+            for i, obj_desc in enumerate(self.object_history):
+                history_lines.append(f"  Frame -{len(self.object_history) - i}: {obj_desc}")
+            history_text = "\n".join(history_lines)
+        else:
+            history_text = "  No previous frames"
+
+        # Previous situations
+        prev_situations = ""
+        if self.situation_history:
+            prev_situations = "\n".join([f"  - {s}" for s in self.situation_history])
+        else:
+            prev_situations = "  No previous updates"
+
+        # Current objects
+        current_objects = self._format_objects_for_history(tracks, frame_width)
+
+        prompt = f"""You are a calm navigation assistant for a visually impaired person walking outdoors.
 
 CURRENT STATE:
-- User: {motion_status}
-- Clearance: {clearance_status}
-- Trigger: {trigger_desc}
+- State: {motion_status}
+- Reason: {reason}
+- Zones: {zone_status}
 
-DETECTED OBJECTS:
-{objects_text}
+OBJECT HISTORY (last 3 frames):
+{history_text}
 
-IMAGE: Camera view. Depth info provided in DETECTED OBJECTS above.
+CURRENT OBJECTS:
+  {current_objects}
 
-RESPOND IN THIS EXACT FORMAT:
-SITUATION: [Describe surroundings. Note if user is moving or still. What's ahead, left, right? Any changes from before? Max 70 words]
-TRIGGER: [Why this alert. Empty if routine with clear path]
-ACTION: [Specific instruction. Empty if none needed]
+PREVIOUS RESPONSES:
+{prev_situations}
 
-ACTION DECISION RULES:
-1. User is {motion_status}
-2. If user is STATIONARY and something approaches them → must DODGE (they cannot "stop")
-3. If user is MOVING and approaches something stationary → can STOP or DODGE
-4. If something approaches user while MOVING → prefer DODGE over STOP (faster reaction)
-5. DODGE direction: {"DODGE LEFT is safe" if ctx.left_clear else "LEFT BLOCKED"}, {"DODGE RIGHT is safe" if ctx.right_clear else "RIGHT BLOCKED"}
-6. If both sides blocked and path blocked → STOP and WAIT
-7. If path is clear → CONTINUE (no action needed)
+RESPOND IN THIS EXACT FORMAT (3 lines only):
+STATE: {motion_status}
+REASON: [Brief reason - "Routine" or "Warning: what's happening"]
+ACTION: [Only if truly needed: "Step left/right" or "Slow down" or "Stop". Otherwise leave empty or say "Continue"]
 
-Be decisive. One clear action only."""
+GUIDELINES:
+- Be calm and reassuring, not alarming
+- Only suggest action if object is <2m AND in center path
+- Objects >3m away generally don't need action yet
+- Prefer gentle guidance ("step slightly left") over urgent commands
+- If path ahead is reasonably clear, no action needed
+- Consider if situation is actually dangerous before warning"""
 
         return prompt
 
@@ -371,19 +724,26 @@ Be decisive. One clear action only."""
         """
         frame_width = left_frame.shape[1]
 
-        # Update motion detection
-        is_moving, motion_score = self.motion_detector.update(left_frame)
+        # Update motion detection using stationary objects
+        is_moving, motion_magnitude, motion_direction, user_speed = self.motion_detector.update(
+            tracks, timestamp
+        )
 
-        # Update clearance analysis
-        left_clear, right_clear, center_clear = self._analyze_clearance(tracks, frame_width)
+        # Update approach tracker with user speed for relative calculations
+        self.approach_tracker.update(tracks, user_speed)
+
+        # Update clearance analysis with zone info
+        left_zone, center_zone, right_zone = self._analyze_clearance(tracks, frame_width)
 
         # Update navigation context
         self.nav_context = NavigationContext(
             is_moving=is_moving,
-            motion_score=motion_score,
-            left_clear=left_clear,
-            right_clear=right_clear,
-            center_clear=center_clear
+            motion_magnitude=motion_magnitude,
+            motion_direction=motion_direction,
+            user_speed=user_speed,
+            left_zone=left_zone,
+            center_zone=center_zone,
+            right_zone=right_zone
         )
 
         # Check for completed response
@@ -409,17 +769,16 @@ Be decisive. One clear action only."""
         if not should_trigger or trigger is None:
             return
 
-        # Prepare image
-        image_b64 = self._prepare_image(left_frame, depth_colored)
-        if image_b64 is None:
-            return
+        # Store current objects in history before making call
+        current_objects = self._format_objects_for_history(tracks, frame_width)
+        self.object_history.append(current_objects)
 
-        # Build prompt
+        # Build prompt (text only, no image)
         prompt = self.build_prompt(trigger, tracks, frame_width)
 
-        # Submit to background thread
+        # Submit to background thread (text-only call)
         self.pending_future = self.executor.submit(
-            self._call_gemini, image_b64, prompt
+            self._call_gemini_text, prompt
         )
         self.pending_trigger = trigger
         self.last_call_time = timestamp
@@ -460,18 +819,17 @@ Be decisive. One clear action only."""
             logger.error(f"Image preparation failed: {e}")
             return None
 
-    def _call_gemini(self, image_b64: str, prompt: str) -> Tuple[Optional[str], float]:
+    def _call_gemini_text(self, prompt: str) -> Tuple[Optional[str], float]:
         """
-        Call Gemini API (runs in background thread).
+        Call Gemini API with text only (runs in background thread).
 
         Args:
-            image_b64: Base64-encoded image.
-            prompt: Analysis prompt.
+            prompt: Text prompt.
 
         Returns:
             Tuple of (response text, elapsed_ms).
         """
-        return self.client.analyze_image_with_retry(image_b64, prompt, use_history=True)
+        return self.client.generate_text_with_retry(prompt)
 
     def _print_response(
         self,
@@ -479,7 +837,7 @@ Be decisive. One clear action only."""
         response: Optional[str],
         elapsed_ms: float
     ) -> None:
-        """Print formatted response to console."""
+        """Print formatted response to console and store in history."""
         separator = "\u2501" * 60
 
         # Determine trigger label and icon
@@ -487,14 +845,15 @@ Be decisive. One clear action only."""
             trigger_label = "UNKNOWN"
             icon = "\U0001F514"  # bell
         elif trigger.trigger_type == TriggerType.DANGER_CLOSE:
-            trigger_label = f"DANGER - {trigger.object_name} at {trigger.distance:.1f}m"
-            icon = "\U0001F6A8"  # rotating light
+            trigger_label = f"WARNING - {trigger.object_name} at {trigger.distance:.1f}m"
+            icon = "\u26A0\uFE0F"  # warning sign
         elif trigger.trigger_type == TriggerType.DANGER_APPROACHING:
-            trigger_label = f"DANGER - {trigger.object_name} approaching {trigger.speed:.1f}m/s"
-            icon = "\U0001F6A8"  # rotating light
+            speed_str = f" {trigger.speed:.1f}m/s" if trigger.speed else ""
+            trigger_label = f"WARNING - {trigger.object_name} approaching{speed_str}"
+            icon = "\u26A0\uFE0F"  # warning sign
         else:
             trigger_label = "ROUTINE"
-            icon = "\U0001F514"  # bell
+            icon = "\U0001F7E2"  # green circle
 
         # Format timing
         timing_str = f"[{elapsed_ms:.0f}ms]"
@@ -505,6 +864,19 @@ Be decisive. One clear action only."""
             print(separator)
             print(response.strip())
             print(f"{separator}\n")
+
+            # Store abbreviated response in history (just the ACTION line if present)
+            lines = response.strip().split('\n')
+            summary = ""
+            for line in lines:
+                if line.startswith('ACTION:'):
+                    action = line.replace('ACTION:', '').strip()
+                    if action and action.lower() not in ['', 'continue', 'none']:
+                        summary = action
+                    break
+            if not summary:
+                summary = f"{trigger_label}"
+            self.situation_history.append(summary)
         else:
             print(f"\n{icon} [{trigger_label}] {timing_str}: No response")
 

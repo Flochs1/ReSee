@@ -9,6 +9,10 @@ colorama>=0.4.6
 # Object detection (CoreML - no PyTorch required at runtime)
 coremltools>=7.0
 
+# Voice interaction
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.14
+
 # Optional: Export YOLO to CoreML (one-time, run scripts/export_coreml.py)
 # ultralytics>=8.0.0
 # torch>=2.0.0
