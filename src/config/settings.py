@@ -103,6 +103,15 @@ class DepthConfig(BaseModel):
         return v
 
 
+class OdometryConfig(BaseModel):
+    """Visual odometry configuration."""
+    enabled: bool = Field(default=True)
+    max_features: int = Field(default=500, ge=100, le=2000)
+    min_features: int = Field(default=20, ge=5, le=100)
+    ransac_threshold: float = Field(default=1.0, ge=0.1, le=10.0)
+    max_trajectory_history: int = Field(default=500, ge=10, le=2000)
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
     level: str = Field(default="INFO")
@@ -127,6 +136,7 @@ class Settings(BaseModel):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     depth: DepthConfig = Field(default_factory=DepthConfig)
+    odometry: OdometryConfig = Field(default_factory=OdometryConfig)
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Settings":

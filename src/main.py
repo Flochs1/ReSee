@@ -21,6 +21,7 @@ from src.utils.timing import FPSController, FrameTimer
 from src.camera.stereo_capture import StereoCamera, StereoCameraError
 from src.camera.display import VideoDisplay
 from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
+from src.odometry import VisualOdometry, WorldState
 
 
 def parse_args():
@@ -84,6 +85,8 @@ class ReSeeApp:
         self.calibrator: Optional[StereoCalibrator] = None
         self.detection_pipeline = None  # Initialized in initialize()
         self.birdseye_view = None  # Initialized in initialize()
+        self.visual_odometry: Optional[VisualOdometry] = None
+        self.world_state: Optional[WorldState] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -93,6 +96,7 @@ class ReSeeApp:
         self.running = False
         self.depth_enabled = False
         self.detection_enabled = False
+        self.odometry_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -248,10 +252,49 @@ class ReSeeApp:
             )
             self.depth_enabled = True
             self.logger.info("Depth estimation enabled")
+
+            # Initialize visual odometry if enabled
+            if self.settings.odometry.enabled:
+                self._initialize_odometry()
+
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to create depth estimator: {e}")
+            return False
+
+    def _initialize_odometry(self) -> bool:
+        """
+        Initialize visual odometry.
+
+        Returns:
+            True if odometry is ready, False otherwise.
+        """
+        try:
+            odom_cfg = self.settings.odometry
+            camera_matrix = self.calibrator.camera_matrix_left
+
+            if camera_matrix is None:
+                self.logger.warning("No camera matrix available for odometry")
+                return False
+
+            self.visual_odometry = VisualOdometry(
+                camera_matrix=camera_matrix,
+                max_features=odom_cfg.max_features,
+                min_features=odom_cfg.min_features,
+                ransac_threshold=odom_cfg.ransac_threshold
+            )
+
+            self.world_state = WorldState(
+                max_history=odom_cfg.max_trajectory_history
+            )
+
+            self.odometry_enabled = True
+            self.logger.info("Visual odometry enabled")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize odometry: {e}")
             return False
 
     def _initialize_detection(self) -> bool:
@@ -288,7 +331,13 @@ class ReSeeApp:
             self.logger.info("Object detection: ENABLED")
         else:
             self.logger.info("Object detection: DISABLED")
+        if self.odometry_enabled:
+            self.logger.info("Visual odometry: ENABLED")
+        else:
+            self.logger.info("Visual odometry: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
+        if self.odometry_enabled:
+            self.logger.info("Press 'R' to reset odometry")
         self.logger.info("-" * 60)
 
         self.running = True
@@ -337,6 +386,16 @@ class ReSeeApp:
                             left_resized, right_resized, include_legend=True
                         )
 
+                    # Process visual odometry if enabled
+                    if self.odometry_enabled and self.visual_odometry and depth_map is not None:
+                        R, t, vo_success = self.visual_odometry.process_frame(
+                            left_resized, depth_map
+                        )
+                        if vo_success:
+                            vo_pos = self.visual_odometry.get_position()
+                            vo_heading = self.visual_odometry.get_heading()
+                            self.world_state.update_pose(R, t, vo_pos, vo_heading)
+
                     # Process detection if enabled
                     tracks = []
                     if self.detection_enabled and self.detection_pipeline:
@@ -366,10 +425,19 @@ class ReSeeApp:
 
                     # Add bird's eye view if detection is enabled (always show, even with no objects)
                     if self.birdseye_view:
+                        # Get camera pose and trajectory if odometry enabled
+                        camera_pose = None
+                        trajectory = None
+                        if self.odometry_enabled and self.world_state:
+                            camera_pose = self.world_state.camera_pose
+                            trajectory = self.world_state.pose_history
+
                         # Render bird's eye view
                         birdseye_frame = self.birdseye_view.render(
                             tracks,
-                            frame_width=target_w
+                            frame_width=target_w,
+                            camera_pose=camera_pose,
+                            trajectory=trajectory
                         )
                         # Scale bird's eye view to match combined frame width
                         combined_width = combined_frame.shape[1]
@@ -385,7 +453,8 @@ class ReSeeApp:
                     elapsed = time.time() - start_time
                     depth_status = " | Depth: ON" if self.depth_enabled else ""
                     detection_status = " | Detection: ON" if self.detection_enabled else ""
-                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}"
+                    odometry_status = " | VO: ON" if self.odometry_enabled else ""
+                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}{odometry_status}"
 
                     self.display.show_frame(
                         combined_frame,
@@ -393,11 +462,17 @@ class ReSeeApp:
                         status=status
                     )
 
-                    # Check for ESC key to quit
+                    # Check for key presses
                     key = self.display.check_key_press(1)
                     if key == 27:  # ESC
                         self.logger.info("ESC pressed, stopping...")
                         break
+                    elif key == ord('r') or key == ord('R'):
+                        # Reset odometry
+                        if self.odometry_enabled and self.visual_odometry and self.world_state:
+                            self.visual_odometry.reset()
+                            self.world_state.reset()
+                            self.logger.info("Visual odometry reset to origin")
 
                 # Log progress every 100 frames
                 if frame_count % 100 == 0:

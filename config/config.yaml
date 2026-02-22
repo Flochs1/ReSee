@@ -86,3 +86,19 @@ depth:
   # Depth range for colorization (in meters)
   min_depth_m: 0.3
   max_depth_m: 5.0
+
+odometry:
+  # Enable visual odometry (requires depth estimation)
+  enabled: true
+
+  # Maximum ORB features to extract per frame
+  max_features: 500
+
+  # Minimum features required for pose estimation
+  min_features: 20
+
+  # RANSAC reprojection threshold in pixels
+  ransac_threshold: 1.0
+
+  # Maximum trajectory history points to display
+  max_trajectory_history: 500

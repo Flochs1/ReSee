@@ -1,9 +1,10 @@
-"""Bird's eye view visualization of detected objects."""
+"""Bird's eye view visualization of detected objects with visual odometry support."""
 
 import math
 import cv2
 import numpy as np
-from typing import List
+from typing import List, Optional
+from collections import deque
 
 from .object_tracker import TrackedObject
 
@@ -12,8 +13,9 @@ class BirdsEyeView:
     """
     Renders a 2D top-down bird's eye view of detected objects.
 
-    Camera is fixed at origin (0,0) facing north (up).
-    Objects are positioned within the 75° FOV cone in front of the camera.
+    Supports two modes:
+    1. Camera-relative: Camera fixed at center, objects positioned relative to camera.
+    2. World coordinates: Camera moves on map, objects at world positions, trajectory shown.
     """
 
     def __init__(
@@ -65,17 +67,21 @@ class BirdsEyeView:
     def render(
         self,
         tracks: List[TrackedObject],
-        frame_width: int
+        frame_width: int,
+        camera_pose=None,
+        trajectory: Optional[deque] = None
     ) -> np.ndarray:
         """
         Render bird's eye view of tracked objects.
 
-        Camera is at center, facing up (north). Objects are positioned
-        based on their depth and horizontal position in the frame.
+        When camera_pose is provided, renders in world-coordinate mode with
+        the camera at center, world rotated based on heading, and trajectory drawn.
 
         Args:
             tracks: List of tracked objects with depth info.
             frame_width: Width of the source camera frame (for X mapping).
+            camera_pose: Optional CameraPose for world-coordinate rendering.
+            trajectory: Optional deque of CameraPose for trajectory visualization.
 
         Returns:
             BGR image of the bird's eye view.
@@ -84,15 +90,26 @@ class BirdsEyeView:
         view = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         view[:] = (30, 30, 30)  # Dark gray background
 
-        # Center of view (camera position)
+        # Center of view (camera position on screen)
         center_x = self.width // 2
         center_y = self.height // 2
+
+        # Get heading for rotation (0 if no pose)
+        heading = camera_pose.heading if camera_pose else 0.0
 
         # Draw circular grid
         self._draw_circular_grid(view, center_x, center_y)
 
-        # Draw FOV cone (facing up/north)
-        self._draw_fov_cone(view, center_x, center_y)
+        # Draw trajectory if in world mode
+        if camera_pose is not None and trajectory is not None:
+            self._draw_trajectory(view, center_x, center_y, camera_pose, trajectory)
+
+        # Draw FOV cone (rotates with heading in world mode)
+        self._draw_fov_cone(view, center_x, center_y, heading=0.0)  # Cone always points up
+
+        # Draw compass if in world mode
+        if camera_pose is not None:
+            self._draw_compass(view, heading)
 
         # Draw camera indicator
         self._draw_camera_indicator(view, center_x, center_y)
@@ -156,9 +173,18 @@ class BirdsEyeView:
             cv2.putText(view, label, (label_x, label_y),
                         font, font_scale, (255, 255, 255), thickness)
 
-        # Draw title
-        cv2.putText(view, "Bird's Eye View", (10, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # Draw title and position info
+        title = "Bird's Eye View"
+        if camera_pose is not None:
+            title += f" | Pos: ({camera_pose.x:.1f}, {camera_pose.y:.1f})m"
+            title += f" | Hdg: {math.degrees(camera_pose.heading):.0f}deg"
+        cv2.putText(view, title, (10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        # Instructions for reset
+        if camera_pose is not None:
+            cv2.putText(view, "Press 'R' to reset odometry", (10, self.height - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
         return view
 
@@ -187,19 +213,21 @@ class BirdsEyeView:
         boundary_radius = int(self.max_depth_m * self.scale)
         cv2.circle(view, (center_x, center_y), boundary_radius, (80, 80, 80), 2)
 
-    def _draw_fov_cone(self, view: np.ndarray, center_x: int, center_y: int) -> None:
-        """Draw FOV cone lines from camera (facing up/north)."""
+    def _draw_fov_cone(self, view: np.ndarray, center_x: int, center_y: int, heading: float = 0.0) -> None:
+        """Draw FOV cone lines from camera."""
         half_fov = self.fov_rad / 2
         line_length = int(self.max_depth_m * self.scale)
 
-        # Left FOV boundary (camera facing up, so left is negative angle)
-        left_x = int(center_x - line_length * math.sin(half_fov))
-        left_y = int(center_y - line_length * math.cos(half_fov))
+        # Left FOV boundary
+        left_angle = -half_fov + heading
+        left_x = int(center_x + line_length * math.sin(left_angle))
+        left_y = int(center_y - line_length * math.cos(left_angle))
         cv2.line(view, (center_x, center_y), (left_x, left_y), (80, 80, 80), 1)
 
         # Right FOV boundary
-        right_x = int(center_x + line_length * math.sin(half_fov))
-        right_y = int(center_y - line_length * math.cos(half_fov))
+        right_angle = half_fov + heading
+        right_x = int(center_x + line_length * math.sin(right_angle))
+        right_y = int(center_y - line_length * math.cos(right_angle))
         cv2.line(view, (center_x, center_y), (right_x, right_y), (80, 80, 80), 1)
 
     def _draw_camera_indicator(self, view: np.ndarray, center_x: int, center_y: int) -> None:
@@ -207,7 +235,7 @@ class BirdsEyeView:
         # Camera body (circle)
         cv2.circle(view, (center_x, center_y), 10, (255, 255, 255), -1)
 
-        # Heading arrow (points up)
+        # Heading arrow (points up - camera's forward direction)
         arrow_length = 25
         arrow_x = center_x
         arrow_y = center_y - arrow_length
@@ -224,3 +252,89 @@ class BirdsEyeView:
         # Label
         cv2.putText(view, "CAM", (center_x - 15, center_y + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    def _draw_trajectory(
+        self,
+        view: np.ndarray,
+        center_x: int,
+        center_y: int,
+        camera_pose,
+        trajectory: deque
+    ) -> None:
+        """Draw camera trajectory (path through world)."""
+        if len(trajectory) < 2:
+            return
+
+        # Convert trajectory to screen coordinates (camera-centered, rotated by -heading)
+        cos_h = math.cos(-camera_pose.heading)
+        sin_h = math.sin(-camera_pose.heading)
+
+        points = []
+        for pose in trajectory:
+            # Relative to current camera position
+            dx = pose.x - camera_pose.x
+            dy = pose.y - camera_pose.y
+
+            # Rotate by negative heading so camera's heading is always up
+            screen_x = center_x + int((dx * cos_h - dy * sin_h) * self.scale)
+            screen_y = center_y - int((dx * sin_h + dy * cos_h) * self.scale)
+
+            points.append((screen_x, screen_y))
+
+        # Draw trajectory line
+        for i in range(1, len(points)):
+            # Fade older parts of trajectory
+            alpha = 0.3 + 0.7 * (i / len(points))
+            color = (int(100 * alpha), int(100 * alpha), int(255 * alpha))  # Blue gradient
+            cv2.line(view, points[i - 1], points[i], color, 1)
+
+        # Draw start marker (oldest point)
+        if points:
+            cv2.circle(view, points[0], 4, (0, 100, 255), -1)  # Orange
+
+    def _draw_compass(self, view: np.ndarray, heading: float) -> None:
+        """Draw compass showing cardinal directions."""
+        # Compass position (top-right corner)
+        compass_x = self.width - 50
+        compass_y = 50
+        radius = 30
+
+        # Draw compass circle
+        cv2.circle(view, (compass_x, compass_y), radius, (60, 60, 60), 1)
+
+        # Draw cardinal directions (rotated by negative heading)
+        directions = [
+            ('N', 0),
+            ('E', math.pi / 2),
+            ('S', math.pi),
+            ('W', -math.pi / 2)
+        ]
+
+        for label, angle in directions:
+            # Rotate direction by negative heading
+            rotated_angle = angle - heading
+            dx = int(radius * 0.8 * math.sin(rotated_angle))
+            dy = int(-radius * 0.8 * math.cos(rotated_angle))
+
+            # Position for label
+            label_x = compass_x + dx - 4
+            label_y = compass_y + dy + 4
+
+            # Draw label (N is highlighted)
+            color = (0, 200, 255) if label == 'N' else (150, 150, 150)
+            cv2.putText(view, label, (label_x, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw north arrow (always points to actual north)
+        north_angle = -heading
+        arrow_len = radius - 5
+        north_dx = int(arrow_len * math.sin(north_angle))
+        north_dy = int(-arrow_len * math.cos(north_angle))
+        cv2.arrowedLine(
+            view,
+            (compass_x, compass_y),
+            (compass_x + north_dx, compass_y + north_dy),
+            (0, 200, 255),  # Yellow/orange
+            1,
+            tipLength=0.4
+        )
