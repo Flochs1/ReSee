@@ -6,7 +6,7 @@ from .motion_detector import MotionDetector
 from .navigation_pipeline import NavigationPipeline
 from .route_types import PlannedRoute, RouteWaypoint
 from .route_planner import RoutePlanner
-from .route_visualizer import draw_route
+from .route_visualizer import draw_route, reset_smooth_path
 
 __all__ = [
     "ObstacleAdvisor",
@@ -18,4 +18,5 @@ __all__ = [
     "RouteWaypoint",
     "RoutePlanner",
     "draw_route",
+    "reset_smooth_path",
 ]
