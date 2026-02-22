@@ -98,7 +98,7 @@ odometry:
   min_features: 20
 
   # Minimum features required to stay out of panic mode (lower = harder to panic)
-  panic_threshold: 10
+  panic_threshold: 5
 
   # RANSAC reprojection threshold in pixels
   ransac_threshold: 1.0

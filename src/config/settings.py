@@ -108,7 +108,7 @@ class OdometryConfig(BaseModel):
     enabled: bool = Field(default=True)
     max_features: int = Field(default=500, ge=100, le=2000)
     min_features: int = Field(default=20, ge=5, le=100)
-    panic_threshold: int = Field(default=10, ge=5, le=100)
+    panic_threshold: int = Field(default=5, ge=4, le=100)
     ransac_threshold: float = Field(default=1.0, ge=0.1, le=10.0)
     max_trajectory_history: int = Field(default=500, ge=10, le=2000)
 
