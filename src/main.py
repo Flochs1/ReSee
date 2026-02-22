@@ -163,7 +163,7 @@ class ReSeeApp:
                 if self.detection_enabled:
                     from src.detection import BirdsEyeView
                     self.birdseye_view = BirdsEyeView(
-                        max_depth_m=self.settings.depth.max_depth_m
+                        max_depth_m=15.0  # Always show 15m range
                     )
                     self.logger.info("Bird's eye view enabled")
             else:
@@ -364,8 +364,8 @@ class ReSeeApp:
                     else:
                         combined_frame = stereo_combined
 
-                    # Add bird's eye view if detection is enabled
-                    if self.birdseye_view and tracks:
+                    # Add bird's eye view if detection is enabled (always show, even with no objects)
+                    if self.birdseye_view:
                         birdseye_frame = self.birdseye_view.render(
                             tracks,
                             frame_width=target_w,
