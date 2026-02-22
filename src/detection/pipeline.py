@@ -63,14 +63,24 @@ class DetectionPipeline:
             logger.error(f"Detection init failed: {e}")
             self.enabled = False
 
-    def process(
+    def detect_only(self, frame: np.ndarray):
+        """Run only the neural network detection (no tracking/drawing).
+
+        Returns raw detections for later processing with update_tracks().
+        """
+        if not self.enabled or self.detector is None:
+            return []
+        return self.detector.detect(frame)
+
+    def update_tracks(
         self,
         frame: np.ndarray,
+        detections,
         depth_map: Optional[np.ndarray] = None,
         timestamp: Optional[float] = None
     ) -> Tuple[np.ndarray, List[TrackedObject]]:
-        """Run detection and tracking on frame."""
-        if not self.enabled or self.detector is None or self.tracker is None:
+        """Update tracker with detections and draw overlays."""
+        if not self.enabled or self.tracker is None:
             return frame, []
 
         if timestamp is None:
@@ -78,16 +88,23 @@ class DetectionPipeline:
 
         self.frame_count += 1
 
-        # Detect objects
-        detections = self.detector.detect(frame)
-
-        # Update tracker
+        # Update tracker with detections
         self.tracks = self.tracker.update(detections, depth_map, timestamp)
 
         # Draw overlays
         frame = draw_tracks(frame, self.tracks)
 
         return frame, self.tracks
+
+    def process(
+        self,
+        frame: np.ndarray,
+        depth_map: Optional[np.ndarray] = None,
+        timestamp: Optional[float] = None
+    ) -> Tuple[np.ndarray, List[TrackedObject]]:
+        """Run detection and tracking on frame (sequential)."""
+        detections = self.detect_only(frame)
+        return self.update_tracks(frame, detections, depth_map, timestamp)
 
     def get_tracks(self) -> List[TrackedObject]:
         return self.tracks

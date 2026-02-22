@@ -26,7 +26,7 @@ def main():
     model = YOLO("yolov8n.pt")
 
     print("Exporting to CoreML...")
-    model.export(format="coreml", imgsz=640)
+    model.export(format="coreml", imgsz=1280)
 
     # Move to models directory
     import shutil

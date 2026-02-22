@@ -9,6 +9,7 @@ import argparse
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -303,11 +304,17 @@ class ReSeeApp:
 
         try:
             while self.running:
+                t_loop_start = time.time()
+
                 # Control frame rate
+                t_wait = time.time()
                 self.fps_controller.wait()
+                wait_ms = (time.time() - t_wait) * 1000
 
                 # Get frames from camera
+                t_cam = time.time()
                 frame_pair = self.camera.get_frame(timeout=0.5)
+                cam_ms = (time.time() - t_cam) * 1000
 
                 if frame_pair is None:
                     self.logger.warning("No frames received from camera")
@@ -326,6 +333,7 @@ class ReSeeApp:
                     target_h = self.settings.camera.resolution.height
 
                     # Resize frames if needed
+                    t_resize = time.time()
                     if left_frame.shape[:2] != (target_h, target_w):
                         left_resized = cv2.resize(left_frame, (target_w, target_h))
                     else:
@@ -335,22 +343,59 @@ class ReSeeApp:
                         right_resized = cv2.resize(right_frame, (target_w, target_h))
                     else:
                         right_resized = right_frame
+                    resize_ms = (time.time() - t_resize) * 1000
 
-                    # Process depth if enabled
+                    # Run depth and detection in PARALLEL
                     depth_map = None
-                    if self.depth_enabled and self.depth_estimator:
-                        depth_colored, depth_map = self.depth_estimator.process_frame(
-                            left_resized, right_resized, include_legend=True
-                        )
-
-                    # Process detection if enabled
+                    depth_colored = None
+                    depth_ms = 0
                     tracks = []
-                    if self.detection_enabled and self.detection_pipeline:
-                        left_resized, tracks = self.detection_pipeline.process(
-                            left_resized, depth_map
+                    detect_ms = 0
+                    detections = []
+
+                    t_parallel = time.time()
+
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        # Submit depth estimation
+                        depth_future = None
+                        if self.depth_enabled and self.depth_estimator:
+                            depth_future = executor.submit(
+                                self.depth_estimator.process_frame,
+                                left_resized, right_resized, True
+                            )
+
+                        # Submit detection (neural network only)
+                        detect_future = None
+                        if self.detection_enabled and self.detection_pipeline:
+                            detect_future = executor.submit(
+                                self.detection_pipeline.detect_only,
+                                left_resized
+                            )
+
+                        # Wait for results
+                        if depth_future:
+                            t_depth = time.time()
+                            depth_colored, depth_map = depth_future.result()
+                            depth_ms = (time.time() - t_depth) * 1000
+
+                        if detect_future:
+                            t_detect = time.time()
+                            detections = detect_future.result()
+                            detect_ms = (time.time() - t_detect) * 1000
+
+                    parallel_ms = (time.time() - t_parallel) * 1000
+
+                    # Update tracker with detections + depth (sequential, fast)
+                    track_ms = 0
+                    if self.detection_enabled and self.detection_pipeline and detections:
+                        t_track = time.time()
+                        left_resized, tracks = self.detection_pipeline.update_tracks(
+                            left_resized, detections, depth_map
                         )
+                        track_ms = (time.time() - t_track) * 1000
 
                     # Combine side-by-side for stereo view
+                    t_combine = time.time()
                     stereo_combined = np.hstack((left_resized, right_resized))
 
                     # Stack depth visualization if available
@@ -369,9 +414,12 @@ class ReSeeApp:
                         combined_frame = np.vstack((stereo_combined, depth_resized))
                     else:
                         combined_frame = stereo_combined
+                    combine_ms = (time.time() - t_combine) * 1000
 
                     # Add bird's eye view if detection is enabled (always show, even with no objects)
+                    bev_ms = 0
                     if self.birdseye_view and self.world_map:
+                        t_bev = time.time()
                         # Update world map with tracked objects
                         current_time = time.monotonic()
                         world_objects = self.world_map.update(
@@ -395,9 +443,11 @@ class ReSeeApp:
                             birdseye_frame,
                             (combined_width, bev_height)
                         )
+                        bev_ms = (time.time() - t_bev) * 1000
                         combined_frame = np.vstack((combined_frame, birdseye_resized))
 
-                    # Create status
+                    # Create status and display
+                    t_display = time.time()
                     elapsed = time.time() - start_time
                     depth_status = " | Depth: ON" if self.depth_enabled else ""
                     detection_status = " | Detection: ON" if self.detection_enabled else ""
@@ -414,6 +464,16 @@ class ReSeeApp:
                     if key == 27:  # ESC
                         self.logger.info("ESC pressed, stopping...")
                         break
+                    display_ms = (time.time() - t_display) * 1000
+
+                    # Log timing every 50 frames
+                    if frame_count % 50 == 0:
+                        loop_ms = (time.time() - t_loop_start) * 1000
+                        self.logger.info(
+                            f"Timing: parallel={parallel_ms:.0f}ms (depth={depth_ms:.0f}, detect={detect_ms:.0f}), "
+                            f"track={track_ms:.0f}ms, bev={bev_ms:.0f}ms, display={display_ms:.0f}ms, "
+                            f"LOOP={loop_ms:.0f}ms"
+                        )
 
                 # Log progress every 100 frames
                 if frame_count % 100 == 0:

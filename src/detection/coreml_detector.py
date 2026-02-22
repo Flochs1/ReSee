@@ -46,7 +46,7 @@ class CoreMLDetector:
         self,
         model_path: str = "models/yolov8n.mlpackage",
         confidence_threshold: float = 0.5,
-        input_size: int = 640
+        input_size: int = 1280
     ):
         """
         Initialize CoreML detector.
@@ -75,12 +75,17 @@ class CoreMLDetector:
             )
 
         logger.info(f"Loading CoreML model: {model_path}")
-        self.model = ct.models.MLModel(str(model_path))
+
+        # Use Neural Engine + GPU for fast inference
+        self.model = ct.models.MLModel(
+            str(model_path),
+            compute_units=ct.ComputeUnit.ALL  # Neural Engine + GPU + CPU
+        )
 
         # Get model spec to understand input/output
         spec = self.model.get_spec()
         self.input_name = spec.description.input[0].name
-        logger.info(f"CoreML detector ready (input={self.input_name}, conf={confidence_threshold})")
+        logger.info(f"CoreML detector ready (input={self.input_name}, conf={confidence_threshold}, compute=ALL)")
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """
@@ -92,9 +97,11 @@ class CoreMLDetector:
         Returns:
             List of Detection objects.
         """
+        import time
         orig_h, orig_w = frame.shape[:2]
 
         # Preprocess: resize and convert BGR->RGB
+        t_pre = time.time()
         img = cv2.resize(frame, (self.input_size, self.input_size))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
@@ -103,8 +110,10 @@ class CoreMLDetector:
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
         img = np.expand_dims(img, axis=0)  # Add batch dimension
+        pre_ms = (time.time() - t_pre) * 1000
 
         # Run inference
+        t_infer = time.time()
         try:
             from PIL import Image
             # Some CoreML models prefer PIL input
@@ -113,10 +122,20 @@ class CoreMLDetector:
         except Exception:
             # Try numpy input
             predictions = self.model.predict({self.input_name: img})
+        infer_ms = (time.time() - t_infer) * 1000
 
         # Parse YOLO output
+        t_post = time.time()
         # YOLOv8 CoreML output format varies - try common formats
         detections = self._parse_predictions(predictions, orig_w, orig_h)
+        post_ms = (time.time() - t_post) * 1000
+
+        # Log timing periodically
+        if not hasattr(self, '_log_counter'):
+            self._log_counter = 0
+        self._log_counter += 1
+        if self._log_counter % 50 == 0:
+            logger.info(f"Detector timing: preprocess={pre_ms:.1f}ms, inference={infer_ms:.1f}ms, postprocess={post_ms:.1f}ms")
 
         return detections
 
