@@ -6,6 +6,7 @@ Compatible with macOS, Linux, and Raspberry Pi.
 """
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -83,6 +84,7 @@ class ReSeeApp:
         self.depth_estimator: Optional[DepthEstimator] = None
         self.calibrator: Optional[StereoCalibrator] = None
         self.detection_pipeline = None  # Initialized in initialize()
+        self.gemini_navigator = None  # Initialized in initialize()
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -160,6 +162,9 @@ class ReSeeApp:
                 self._initialize_detection()
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
+
+            # Initialize Gemini navigator
+            self._initialize_gemini()
 
             self.logger.info("All components initialized successfully")
             return True
@@ -267,6 +272,30 @@ class ReSeeApp:
             self.logger.error(f"Failed to initialize detection: {e}")
             return False
 
+    def _initialize_gemini(self) -> bool:
+        """
+        Initialize Gemini navigation assistant.
+
+        Returns:
+            True if navigator is ready, False otherwise.
+        """
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            self.logger.warning("GEMINI_API_KEY not set, navigator disabled")
+            return False
+
+        try:
+            from src.gemini.navigator import GeminiNavigator
+            self.gemini_navigator = GeminiNavigator(
+                api_key=api_key,
+                user_goal="I'm moving forward. Alert me to obstacles in my path."
+            )
+            self.logger.info("Gemini navigator enabled")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Gemini navigator: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -367,6 +396,17 @@ class ReSeeApp:
                         status=status
                     )
 
+                    # Process Gemini navigation (non-blocking)
+                    if self.gemini_navigator:
+                        tracks = self.detection_pipeline.get_tracks() if self.detection_enabled else []
+                        depth_viz = depth_colored if self.depth_enabled else None
+                        self.gemini_navigator.process_frame(
+                            left_frame=left_resized,
+                            depth_colored=depth_viz,
+                            tracks=tracks,
+                            timestamp=time.time()
+                        )
+
                     # Check for ESC key to quit
                     key = self.display.check_key_press(1)
                     if key == 27:  # ESC
@@ -401,6 +441,10 @@ class ReSeeApp:
     def cleanup(self) -> None:
         """Cleanup all resources."""
         self.logger.info("Cleaning up resources...")
+
+        # Shutdown Gemini navigator
+        if self.gemini_navigator:
+            self.gemini_navigator.shutdown()
 
         # Close display
         if self.display:
