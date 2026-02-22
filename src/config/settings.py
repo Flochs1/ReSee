@@ -57,6 +57,14 @@ class GeminiConfig(BaseModel):
     timeout: int = Field(default=30, ge=5, le=300)
     frame_interval: float = Field(default=2.0, ge=0.5, le=10.0)
 
+    # Route planning settings
+    route_planning_enabled: bool = Field(default=True)
+    planning_interval_seconds: float = Field(default=1.0, ge=0.5, le=10.0)
+    min_safe_distance_m: float = Field(default=2.0, ge=0.5, le=5.0)
+    max_route_age_seconds: float = Field(default=3.0, ge=1.0, le=10.0)
+    route_image_size: int = Field(default=200, ge=100, le=400)
+    route_jpeg_quality: int = Field(default=60, ge=30, le=95)
+
     @property
     def api_key(self) -> str:
         """Get API key from environment variable."""
@@ -67,6 +75,10 @@ class GeminiConfig(BaseModel):
                 f"Please set it in your .env file or environment."
             )
         return api_key
+
+    def has_api_key(self) -> bool:
+        """Check if API key is available without raising an error."""
+        return bool(os.getenv(self.api_key_env))
 
 
 class DisplayConfig(BaseModel):

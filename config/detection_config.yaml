@@ -18,10 +18,11 @@ detection:
 
 tracking:
   # Minimum IoU to match detection to existing track
-  iou_threshold: 0.3
+  # Lower = more forgiving matching (0.1-0.2 for unstable detections)
+  iou_threshold: 0.15
 
   # Seconds before dropping unseen tracks
-  max_age_seconds: 1.0
+  max_age_seconds: 2.0
 
   # Depth history for closing speed calculation
   depth_history_frames: 30

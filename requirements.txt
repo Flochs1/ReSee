@@ -6,6 +6,9 @@ pyyaml>=6.0.1
 pydantic>=2.6.0
 colorama>=0.4.6
 
+# Gemini API for route planning
+google-genai>=1.0.0
+
 # Object detection (CoreML - no PyTorch required at runtime)
 coremltools>=7.0
 

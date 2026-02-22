@@ -39,7 +39,31 @@ camera:
 #   # Audio device index (null = system default)
 #   device_index: null
 
-# Gemini API settings removed - this is now a simple camera viewer
+# Gemini API settings for route planning
+gemini:
+  # Environment variable containing API key
+  api_key_env: "GEMINI_API_KEY"
+
+  # Model to use (gemini-2.5-flash-lite is fast and cost-effective)
+  model: "gemini-2.5-flash-lite"
+
+  # Enable Gemini-based route planning
+  route_planning_enabled: true
+
+  # Planning interval in seconds (how often to call Gemini)
+  planning_interval_seconds: 1.0
+
+  # Minimum safe distance - objects closer than this are avoided
+  min_safe_distance_m: 2.0
+
+  # Discard route plans older than this (seconds)
+  max_route_age_seconds: 5.0
+
+  # Image size for Gemini (smaller = faster, less bandwidth)
+  route_image_size: 200
+
+  # JPEG quality for route planning images (lower = smaller size)
+  route_jpeg_quality: 60
 
 display:
   # Enable video preview window (falls back to headless if unavailable)

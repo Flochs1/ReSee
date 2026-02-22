@@ -87,6 +87,7 @@ class ReSeeApp:
         self.birdseye_view = None  # Initialized in initialize()
         self.visual_odometry: Optional[VisualOdometry] = None
         self.world_state: Optional[WorldState] = None
+        self.route_planner = None  # Initialized in initialize()
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -97,6 +98,7 @@ class ReSeeApp:
         self.depth_enabled = False
         self.detection_enabled = False
         self.odometry_enabled = False
+        self.route_planning_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -170,6 +172,9 @@ class ReSeeApp:
                         max_depth_m=15.0  # Always show 15m range
                     )
                     self.logger.info("Bird's eye view enabled")
+
+                    # Initialize route planner if Gemini is configured
+                    self._initialize_route_planner()
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
 
@@ -319,6 +324,50 @@ class ReSeeApp:
             self.logger.error(f"Failed to initialize detection: {e}")
             return False
 
+    def _initialize_route_planner(self) -> bool:
+        """
+        Initialize Gemini-based route planner.
+
+        Returns:
+            True if route planner is ready, False otherwise.
+        """
+        try:
+            # Check if Gemini config exists and route planning is enabled
+            if not self.settings.gemini:
+                self.logger.info("Route planning disabled (no Gemini config)")
+                return False
+
+            if not self.settings.gemini.route_planning_enabled:
+                self.logger.info("Route planning disabled in config")
+                return False
+
+            if not self.settings.gemini.has_api_key():
+                self.logger.warning("Route planning disabled (no GEMINI_API_KEY in .env)")
+                return False
+
+            from src.navigation import RoutePlanner
+
+            gemini_cfg = self.settings.gemini
+            self.route_planner = RoutePlanner(
+                api_key=gemini_cfg.api_key,
+                planning_interval=gemini_cfg.planning_interval_seconds,
+                image_size=(gemini_cfg.route_image_size, gemini_cfg.route_image_size),
+                jpeg_quality=gemini_cfg.route_jpeg_quality,
+                min_safe_distance_m=gemini_cfg.min_safe_distance_m,
+                max_route_age_seconds=gemini_cfg.max_route_age_seconds
+            )
+            self.route_planner.start()
+            self.route_planning_enabled = True
+            self.logger.info("Route planning enabled (Gemini 2.5 Flash Lite)")
+            return True
+
+        except ImportError as e:
+            self.logger.warning(f"Route planner not available: {e}")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize route planner: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -336,6 +385,10 @@ class ReSeeApp:
             self.logger.info("Visual odometry: ENABLED")
         else:
             self.logger.info("Visual odometry: DISABLED")
+        if self.route_planning_enabled:
+            self.logger.info("Route planning: ENABLED (Gemini)")
+        else:
+            self.logger.info("Route planning: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         if self.odometry_enabled:
             self.logger.info("Press 'R' to reset odometry")
@@ -446,6 +499,27 @@ class ReSeeApp:
                             trajectory=trajectory,
                             tracking_state=tracking_state
                         )
+
+                        # Update route planner and draw route overlay
+                        if self.route_planning_enabled and self.route_planner:
+                            # Send data to planner (non-blocking)
+                            self.route_planner.update(birdseye_frame, tracks)
+
+                            # Get current route and draw it (filter to current track IDs)
+                            route = self.route_planner.get_current_route(current_tracks=tracks)
+                            if route and route.waypoints:
+                                from src.navigation import draw_route
+                                birdseye_frame = draw_route(
+                                    birdseye_frame,
+                                    route,
+                                    tracks,
+                                    center_x=self.birdseye_view.width // 2,
+                                    center_y=self.birdseye_view.height // 2,
+                                    scale=self.birdseye_view.scale,
+                                    fov_rad=self.birdseye_view.fov_rad,
+                                    frame_width=target_w
+                                )
+
                         # Scale bird's eye view to match combined frame width
                         combined_width = combined_frame.shape[1]
                         bev_scale = combined_width / birdseye_frame.shape[1]
@@ -461,7 +535,8 @@ class ReSeeApp:
                     depth_status = " | Depth: ON" if self.depth_enabled else ""
                     detection_status = " | Detection: ON" if self.detection_enabled else ""
                     odometry_status = " | VO: ON" if self.odometry_enabled else ""
-                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}{odometry_status}"
+                    route_status = " | Route: ON" if self.route_planning_enabled else ""
+                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}{odometry_status}{route_status}"
 
                     self.display.show_frame(
                         combined_frame,
@@ -509,6 +584,10 @@ class ReSeeApp:
     def cleanup(self) -> None:
         """Cleanup all resources."""
         self.logger.info("Cleaning up resources...")
+
+        # Stop route planner
+        if self.route_planner:
+            self.route_planner.stop()
 
         # Close display
         if self.display:
