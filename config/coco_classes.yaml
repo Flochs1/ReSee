@@ -1,0 +1,104 @@
+# COCO class stationarity annotations for ego-motion estimation
+# stationary: true = reliable anchor for camera motion estimation
+# stationary: false = object likely moves, not an anchor
+
+classes:
+  # Living things - generally move
+  person: { stationary: false }
+  bird: { stationary: false }
+  cat: { stationary: false }
+  dog: { stationary: false }
+  horse: { stationary: false }
+  sheep: { stationary: false }
+  cow: { stationary: false }
+  elephant: { stationary: false }
+  bear: { stationary: false }
+  zebra: { stationary: false }
+  giraffe: { stationary: false }
+
+  # Vehicles - definitely move
+  bicycle: { stationary: false }
+  car: { stationary: false }
+  motorcycle: { stationary: false }
+  airplane: { stationary: false }
+  bus: { stationary: false }
+  train: { stationary: false }
+  truck: { stationary: false }
+  boat: { stationary: false }
+
+  # Fixed infrastructure - RELIABLE ANCHORS
+  traffic light: { stationary: true }
+  fire hydrant: { stationary: true }
+  stop sign: { stationary: true }
+  parking meter: { stationary: true }
+  bench: { stationary: true }
+
+  # Furniture - stationary in context
+  chair: { stationary: true }
+  couch: { stationary: true }
+  potted plant: { stationary: true }
+  bed: { stationary: true }
+  dining table: { stationary: true }
+  toilet: { stationary: true }
+
+  # Appliances - fixed in place
+  tv: { stationary: true }
+  microwave: { stationary: true }
+  oven: { stationary: true }
+  toaster: { stationary: true }
+  sink: { stationary: true }
+  refrigerator: { stationary: true }
+
+  # Decor - usually stationary
+  clock: { stationary: true }
+  vase: { stationary: true }
+
+  # Handheld/carried items - move with people
+  backpack: { stationary: false }
+  umbrella: { stationary: false }
+  handbag: { stationary: false }
+  tie: { stationary: false }
+  suitcase: { stationary: false }
+  cell phone: { stationary: false }
+  remote: { stationary: false }
+  mouse: { stationary: false }
+  scissors: { stationary: false }
+  hair drier: { stationary: false }
+  toothbrush: { stationary: false }
+
+  # Sports equipment - in motion during use
+  frisbee: { stationary: false }
+  skis: { stationary: false }
+  snowboard: { stationary: false }
+  sports ball: { stationary: false }
+  kite: { stationary: false }
+  baseball bat: { stationary: false }
+  baseball glove: { stationary: false }
+  skateboard: { stationary: false }
+  surfboard: { stationary: false }
+  tennis racket: { stationary: false }
+
+  # Food/tableware - context dependent, assume not anchors
+  bottle: { stationary: false }
+  wine glass: { stationary: false }
+  cup: { stationary: false }
+  fork: { stationary: false }
+  knife: { stationary: false }
+  spoon: { stationary: false }
+  bowl: { stationary: false }
+  banana: { stationary: false }
+  apple: { stationary: false }
+  sandwich: { stationary: false }
+  orange: { stationary: false }
+  broccoli: { stationary: false }
+  carrot: { stationary: false }
+  hot dog: { stationary: false }
+  pizza: { stationary: false }
+  donut: { stationary: false }
+  cake: { stationary: false }
+
+  # Other
+  laptop: { stationary: false }
+  keyboard: { stationary: false }
+  book: { stationary: false }
+  teddy bear: { stationary: false }

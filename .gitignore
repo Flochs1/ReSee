@@ -212,3 +212,4 @@ __marimo__/
 recordings/
 models/hitnet/
 *.pt
+.DS_Store
