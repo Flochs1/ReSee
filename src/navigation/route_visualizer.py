@@ -16,6 +16,9 @@ FLOOR_CLASSES = {'floor', 'ground', 'carpet', 'rug', 'mat'}
 # Classes that are typically walls/fixed structures (avoid only if directly ahead)
 WALL_CLASSES = {'wall', 'door', 'window', 'pillar', 'column'}
 
+# DANGEROUS: Roads should be avoided at all costs
+ROAD_CLASSES = {'road', 'street', 'pavement', 'asphalt', 'highway', 'lane', 'crosswalk'}
+
 
 class NavigationVoice:
     """
@@ -217,11 +220,11 @@ class ProximityAnalyzer:
     # Thresholds
     SOFT_DEVIATION_RANGE = 3.0  # meters - consider objects within this range
     EMERGENCY_RANGE = 1.0  # meters - hard turn trigger
-    CENTER_ANGLE_THRESHOLD = 0.3  # radians (~17 deg) - "in front" zone
+    CENTER_ANGLE_THRESHOLD = 0.2  # radians (~11 deg) - "in front" zone
 
     # Deviation strengths
-    MAX_SOFT_DEVIATION = 250  # pixels - max soft curve offset
-    EMERGENCY_TURN_OFFSET = 400  # pixels - emergency turn magnitude
+    MAX_SOFT_DEVIATION = 80  # pixels - max soft curve offset
+    EMERGENCY_TURN_OFFSET = 50  # pixels - emergency turn magnitude (subtle)
 
     def __init__(self):
         self._last_deviation = 0.0  # Smoothed deviation value
@@ -268,8 +271,18 @@ class ProximityAnalyzer:
             norm_x = bbox_center_x / frame_width
             angle = (norm_x - 0.5) * fov_rad  # negative = left, positive = right
 
+            # ROADS are extremely dangerous - treat as emergency even at greater distance
+            is_road = class_lower in ROAD_CLASSES
+            if is_road:
+                # Roads trigger emergency at 1m instead of 0.6m
+                road_emergency_range = 1.0
+                if depth < road_emergency_range and abs(angle) < self.CENTER_ANGLE_THRESHOLD * 1.2:
+                    # Road is highest priority emergency
+                    if emergency_obstacle is None or is_road:
+                        emergency_obstacle = (depth, angle, class_lower)
+
             # Check for emergency obstacle (< 1m and in front)
-            if depth < self.EMERGENCY_RANGE:
+            elif depth < self.EMERGENCY_RANGE:
                 # Is it in front of us (within center cone)?
                 if abs(angle) < self.CENTER_ANGLE_THRESHOLD:
                     # Skip walls unless directly centered
@@ -282,6 +295,10 @@ class ProximityAnalyzer:
 
             # Accumulate proximity for soft deviation (inverse depth weighting)
             proximity_weight = 1.0 / depth
+
+            # Roads get 5x weight - avoid them like the plague
+            if is_road:
+                proximity_weight *= 5.0
 
             # Weight more heavily for objects closer to center (more dangerous)
             center_weight = 1.0 - (abs(angle) / (fov_rad / 2)) * 0.5

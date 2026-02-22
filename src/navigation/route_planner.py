@@ -709,8 +709,12 @@ OBJECTS (id: type at distance):
 
 AVOID (too close): {', '.join(avoid_list) if avoid_list else 'none'}
 
+CRITICAL DANGER - NEVER route towards these:
+- ROADS, STREETS, HIGHWAYS - absolute top priority to avoid! Never cross or approach roads.
+- Moving vehicles: cars, trucks, buses, motorcycles, bikes
+
 SAFETY RULES - Skip these as waypoints (but you can pass by them):
-- Moving objects: people, cars, bikes, animals (unpredictable movement)
+- Moving objects: people, animals (unpredictable movement)
 - Trip hazards: backpacks, bags, luggage on the ground
 - Unstable objects: bottles, cups, small items that could be knocked over
 - Sharp/dangerous: knives, scissors, glass
@@ -721,11 +725,12 @@ PREFER as waypoints:
 - Fixed/stable furniture: tables, desks, couches, beds, TVs
 - Large stable objects: refrigerators, doors, plants, shelves
 - Stationary landmarks: traffic lights, signs, benches
+- Stay on sidewalks/paths, NEVER on roads
 
 Reply with ONLY this JSON (no markdown, no explanation):
 {{"waypoints":[{{"id":{selected[0].track_id}}},{{"id":{target_track.track_id}}}]}}
 
-Replace the example with your actual route using the exact IDs above. Include 2-4 waypoints total, ending with {target_track.track_id}. Only include safe, stable waypoints."""
+Replace the example with your actual route using the exact IDs above. Include 2-4 waypoints total, ending with {target_track.track_id}. Only include safe, stable waypoints. NEVER include roads as waypoints."""
 
     def _parse_response(
         self,

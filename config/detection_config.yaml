@@ -9,7 +9,7 @@ detection:
   model_path: "models/yolov8n.mlpackage"
 
   # Minimum confidence for detections
-  confidence_threshold: 0.25
+  confidence_threshold: 0.1
 
   # Use CoreML (recommended) vs ultralytics/PyTorch
   # CoreML: Fast, no PyTorch dependency, no OpenCV conflict
