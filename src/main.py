@@ -380,36 +380,19 @@ class ReSeeApp:
         """
         Initialize voice interface for TTS and speech recognition.
 
-        Prefers Gemini Live API for better STT/TTS, falls back to Whisper.
-
         Returns:
             True if voice is ready, False otherwise.
         """
-        # Try Gemini voice first (better quality)
-        if GEMINI_VOICE_AVAILABLE and os.environ.get('GEMINI_API_KEY'):
-            try:
-                self.voice_interface = GeminiVoiceInterface()
-                self.voice_interface.start()
-
-                if self.navigator:
-                    self.navigator.set_voice_interface(self.voice_interface)
-
-                self.voice_enabled = True
-                self.logger.info("Gemini voice interface enabled (say 'Resee' to speak)")
-                return True
-            except Exception as e:
-                self.logger.warning(f"Gemini voice failed, trying fallback: {e}")
-
-        # Fallback to Whisper-based voice interface
+        # Use local Whisper-based voice interface (Gemini voice disabled)
         try:
-            self.voice_interface = VoiceInterface()
+            self.voice_interface = VoiceInterface(use_whisper=True)
             self.voice_interface.start()
 
             if self.navigator:
                 self.navigator.set_voice_interface(self.voice_interface)
 
             self.voice_enabled = True
-            self.logger.info("Voice interface enabled (say 'Resee' to speak)")
+            self.logger.info("Local Whisper voice interface enabled (say 'Resee' to speak)")
             return True
         except Exception as e:
             self.logger.warning(f"Voice interface not available: {e}")

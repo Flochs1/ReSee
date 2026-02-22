@@ -37,7 +37,7 @@ WAKE_WORDS = [
     'recei', 'receive', 'receipt',
     'we see', 'he see', 'she see', 'i see',
     'heresy', 'her see', 'hear see',
-    'razee', 'risi', 'risee', 'risey', 'rizzy',
+    'razee', 'risi', 'rishi', 'risee', 'risey', 'rizzy',
     'racy', 'racey', 'rase', 'raise',
     'rc', 're c', 're z', 'rez',
     'easy', 're easy', 'uneasy',

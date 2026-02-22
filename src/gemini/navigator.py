@@ -470,8 +470,8 @@ class GeminiNavigator:
         self.last_call_time = 0.0
 
         # History tracking (last 7 frames/responses for consistency)
-        self.object_history: deque = deque(maxlen=7)  # List of object descriptions per frame
-        self.situation_history: deque = deque(maxlen=7)  # Previous Gemini responses
+        self.object_history: deque = deque(maxlen=6)  # List of object descriptions per frame
+        self.situation_history: deque = deque(maxlen=6)  # Previous Gemini responses
 
         # Background execution (non-blocking)
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -621,13 +621,16 @@ class GeminiNavigator:
             # Get relative approach speed (accounts for our own movement)
             relative_speed = self.approach_tracker.get_relative_speed(track.track_id)
 
-            # Require 7 frames of consistent approaching behavior before warning
+            # Require 6 frames of consistent approaching behavior before warning when stationary
             if not ctx.is_moving:
-                if not self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=7):
-                    continue  # Skip warning - not consistently getting closer over 7 frames
+                if not self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=6):
+                    continue  # Skip warning - not consistently getting closer over 6 frames
 
             # Check if object is actively approaching (mobile, changed recently, consistent over 7 frames)
-            if self.approach_tracker.is_actively_approaching(track.track_id, min_samples=7):
+            if self.approach_tracker.is_actively_approaching(
+                track.track_id,
+                min_samples=6 if not ctx.is_moving else 7
+            ):
                 return True, TriggerInfo(
                     trigger_type=TriggerType.DANGER_APPROACHING,
                     reason=f"{track.class_name} actively approaching",
@@ -637,9 +640,9 @@ class GeminiNavigator:
                 )
 
             # Also trigger for fast relative approach (even if not persistent yet)
-            # But only if moving, or if monotonically approaching over 7 frames when stationary
+            # But only if moving, or if monotonically approaching over 6 frames when stationary
             if relative_speed > self.closing_speed_threshold:
-                if ctx.is_moving or self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=7):
+                if ctx.is_moving or self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=6):
                     return True, TriggerInfo(
                         trigger_type=TriggerType.DANGER_APPROACHING,
                         reason=f"{track.class_name} approaching fast",
@@ -752,7 +755,7 @@ class GeminiNavigator:
             # Extract the actual question from reason
             user_question = trigger.reason.replace("User request: ", "")
 
-            # Build history context (7 frames for consistency)
+            # Build history context (6 frames for consistency)
             history_text = ""
             if self.object_history:
                 history_lines = []
@@ -767,12 +770,12 @@ class GeminiNavigator:
 
             return f"""You are a friendly assistant helping a visually impaired person understand their surroundings. They asked: "{user_question}"
 
-IMAGE: Camera view with object detection boxes (top) and depth heatmap (bottom, red=close, blue=far).
+IMAGE: Camera view with object detection boxes.
 
 WHAT I SEE NOW:
 {current_objects}
 
-RECENT HISTORY (last 7 frames - use for consistency):
+RECENT HISTORY (last 6 frames - use for consistency):
 {history_text}
 
 IMPORTANT RULES:
@@ -799,7 +802,7 @@ ACTION: [Your natural, friendly answer to their question based on what you see]"
         # Current zone status
         zone_status = f"Left: {self._format_zone_status(ctx.left_zone, 'L')}, Center: {self._format_zone_status(ctx.center_zone, 'C')}, Right: {self._format_zone_status(ctx.right_zone, 'R')}"
 
-        # Build history context (7 frames)
+        # Build history context (6 frames)
         history_text = ""
         if self.object_history:
             history_lines = []
@@ -824,12 +827,15 @@ ACTION: [Your natural, friendly answer to their question based on what you see]"
             action_guidance = """- Speak naturally like a friend giving directions
 - "Maybe step a bit to the left" or "There's something ahead, careful"
 - "You're good, path is clear" or "All clear ahead"
-- Only warn if something is actually close (within 2 meters) and in your path"""
+- Only warn if something is actually close (within 2 meters) and in your path
+- Keep ACTION to one short, human sentence (max 10 words)"""
         else:
             action_guidance = """- You're standing still, so DON'T say "stop" or "slow down" - you're already stopped!
+- If warning, use a simple phrasing like: "Hey [thing] coming up ahead, dodge right"
 - "There's something in front of you" or "Someone's nearby on your left"
 - "All clear when you're ready to go" or "Path looks good"
-- Speak naturally like a helpful friend"""
+- Speak naturally like a helpful friend
+- Keep ACTION to one short, human sentence (max 10 words)"""
 
         prompt = f"""You're helping a visually impaired friend navigate. Be warm and natural, like a real person.
 
@@ -841,7 +847,7 @@ RIGHT NOW:
 WHAT I SEE:
 {current_objects}
 
-LAST 7 FRAMES (for consistency - only mention things that persist):
+LAST 6 FRAMES (for consistency - only mention things that persist):
 {history_text}
 
 MY RECENT GUIDANCE:
@@ -850,7 +856,7 @@ MY RECENT GUIDANCE:
 RESPOND IN THIS FORMAT:
 STATE: {"Moving" if ctx.is_moving else "Stationary"}
 REASON: [Very brief - what triggered this]
-ACTION: [Natural, friendly guidance - or "All clear" if nothing to worry about]
+ACTION: [One short, human sentence (max 10 words). Example: "Something ahead, dodge right."]
 
 HOW TO RESPOND:
 {action_guidance}
@@ -952,12 +958,12 @@ HOW TO RESPOND:
         # Build prompt
         prompt = self.build_prompt(trigger, tracks, frame_width)
 
-        # For USER_REQUEST, include annotated image with depth heatmap
+        # For USER_REQUEST, include annotated image only (no depth heatmap)
         if trigger.trigger_type == TriggerType.USER_REQUEST:
             image_base64 = self._prepare_image(
                 self.current_annotated_frame,
                 self.current_depth_colored,
-                include_depth=True
+                include_depth=False
             )
             if image_base64:
                 self.pending_future = self.executor.submit(
