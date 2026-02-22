@@ -94,8 +94,11 @@ odometry:
   # Maximum ORB features to extract per frame
   max_features: 500
 
-  # Minimum features required for pose estimation
+  # Minimum features required for pose estimation (PnP)
   min_features: 20
+
+  # Minimum features required to stay out of panic mode (lower = harder to panic)
+  panic_threshold: 10
 
   # RANSAC reprojection threshold in pixels
   ransac_threshold: 1.0

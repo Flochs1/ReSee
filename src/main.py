@@ -282,7 +282,8 @@ class ReSeeApp:
                 camera_matrix=camera_matrix,
                 max_features=odom_cfg.max_features,
                 min_features=odom_cfg.min_features,
-                ransac_threshold=odom_cfg.ransac_threshold
+                ransac_threshold=odom_cfg.ransac_threshold,
+                panic_threshold=odom_cfg.panic_threshold
             )
 
             self.world_state = WorldState(

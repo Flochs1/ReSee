@@ -22,7 +22,8 @@ class VisualOdometry:
         camera_matrix: np.ndarray,
         max_features: int = 500,
         min_features: int = 20,
-        ransac_threshold: float = 1.0
+        ransac_threshold: float = 1.0,
+        panic_threshold: int = 50
     ):
         """
         Initialize visual odometry.
@@ -32,10 +33,12 @@ class VisualOdometry:
             max_features: Maximum features for ORB extraction.
             min_features: Minimum features required for PnP.
             ransac_threshold: RANSAC reprojection threshold in pixels.
+            panic_threshold: Minimum matches required to stay out of panic mode.
         """
         self.camera_matrix = camera_matrix.astype(np.float64)
         self.ransac_threshold = ransac_threshold
         self.min_features = min_features
+        self.panic_threshold = panic_threshold
 
         # ORB detector (we manage features ourselves for panic mode)
         self.orb = cv2.ORB_create(
@@ -65,7 +68,7 @@ class VisualOdometry:
         self.in_panic = False
         self.frame_count = 0
 
-        logger.info(f"Visual odometry initialized (ransac={ransac_threshold}, min_features={min_features})")
+        logger.info(f"Visual odometry initialized (ransac={ransac_threshold}, min_features={min_features}, panic_threshold={panic_threshold})")
 
     def process_frame(
         self,
@@ -122,15 +125,15 @@ class VisualOdometry:
                 logger.warning("Tracking LOST - entering panic mode (match failed)")
             return None, None, False
 
-        if len(matches) < self.min_features:
-            # Not enough matches - stay in or enter panic mode
-            if not self.in_panic:
-                self.in_panic = True
-                logger.warning(f"Tracking LOST - entering panic mode ({len(matches)} matches < {self.min_features})")
-            return None, None, False
-
         # Sort by distance (best matches first)
         matches = sorted(matches, key=lambda x: x.distance)
+
+        # Check if we have enough matches to avoid panic
+        if len(matches) < self.panic_threshold:
+            if not self.in_panic:
+                self.in_panic = True
+                logger.warning(f"Tracking LOST - entering panic mode ({len(matches)} matches < {self.panic_threshold})")
+            return None, None, False
 
         # Extract matched keypoints
         prev_matched = [self.last_good_keypoints[m.queryIdx] for m in matches]
@@ -141,10 +144,11 @@ class VisualOdometry:
             prev_matched, curr_matched, self.last_good_depth_map
         )
 
-        if len(pts_3d) < self.min_features:
+        # Check 3D points against panic threshold
+        if len(pts_3d) < self.panic_threshold:
             if not self.in_panic:
                 self.in_panic = True
-                logger.warning(f"Tracking LOST - entering panic mode ({len(pts_3d)} 3D points < {self.min_features})")
+                logger.warning(f"Tracking LOST - entering panic mode ({len(pts_3d)} 3D points < {self.panic_threshold})")
             return None, None, False
 
         # Solve PnP
@@ -226,7 +230,7 @@ class VisualOdometry:
                 flags=cv2.SOLVEPNP_ITERATIVE
             )
 
-            if not success or inliers is None or len(inliers) < self.min_features:
+            if not success or inliers is None or len(inliers) < self.panic_threshold:
                 return None, None, False
 
             R, _ = cv2.Rodrigues(rvec)
