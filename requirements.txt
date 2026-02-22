@@ -12,6 +12,11 @@ google-genai>=1.0.0
 # Object detection (CoreML - no PyTorch required at runtime)
 coremltools>=7.0
 
+# Voice interface
+pyaudio>=0.2.14
+SpeechRecognition>=3.10.0
+openai-whisper>=20231117
+
 # Optional: Export YOLO to CoreML (one-time, run scripts/export_coreml.py)
 # ultralytics>=8.0.0
 # torch>=2.0.0

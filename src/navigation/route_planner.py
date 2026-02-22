@@ -19,6 +19,124 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class DestinationMatcher:
+    """
+    Matches spoken destination requests to detected objects using Gemini.
+
+    When user says "take me to the chair", this matches it to the best
+    detected object (by class name, position, etc).
+    """
+
+    def __init__(self, gemini_client: GeminiClient):
+        """
+        Initialize destination matcher.
+
+        Args:
+            gemini_client: Shared Gemini client for API calls.
+        """
+        self.gemini = gemini_client
+        self._lock = threading.Lock()
+
+    def match_destination(
+        self,
+        destination_text: str,
+        tracks: List[TrackedObject],
+        min_safe_distance_m: float = 2.0
+    ) -> Optional[int]:
+        """
+        Match a spoken destination to a tracked object.
+
+        Args:
+            destination_text: User's spoken destination (e.g., "the chair", "table").
+            tracks: List of currently tracked objects.
+            min_safe_distance_m: Minimum distance for valid targets.
+
+        Returns:
+            Track ID of the best matching object, or None if no match.
+        """
+        with self._lock:
+            # Filter to valid targets
+            valid_tracks = [t for t in tracks
+                          if t.get_current_depth() >= min_safe_distance_m]
+
+            if not valid_tracks:
+                logger.warning(f"[DEST] No valid targets for '{destination_text}'")
+                return None
+
+            # Build object list for Gemini
+            obj_list = []
+            for t in valid_tracks:
+                obj_list.append(f"  ID {t.track_id}: {t.class_name} at {t.get_current_depth():.1f}m")
+
+            prompt = f"""The user wants to navigate to: "{destination_text}"
+
+Here are the objects I can see:
+{chr(10).join(obj_list)}
+
+Which object best matches what the user wants? Consider:
+- Exact class name matches (e.g., "chair" matches "chair")
+- Similar objects (e.g., "seat" could match "chair", "couch")
+- If multiple match, prefer the closest one
+- If nothing matches well, pick the most likely candidate
+
+Reply with ONLY the ID number of the best matching object. Just the number, nothing else.
+Example response: 5"""
+
+            try:
+                response = self.gemini.generate(prompt)
+                if not response:
+                    logger.warning("[DEST] Gemini returned no response")
+                    return self._fallback_match(destination_text, valid_tracks)
+
+                # Parse response - should just be a number
+                response = response.strip()
+                match = re.search(r'\d+', response)
+                if match:
+                    track_id = int(match.group())
+                    # Verify this ID exists
+                    if any(t.track_id == track_id for t in valid_tracks):
+                        logger.info(f"[DEST] Matched '{destination_text}' -> track {track_id}")
+                        return track_id
+
+                logger.warning(f"[DEST] Could not parse response: {response}")
+                return self._fallback_match(destination_text, valid_tracks)
+
+            except Exception as e:
+                logger.error(f"[DEST] Gemini error: {e}")
+                return self._fallback_match(destination_text, valid_tracks)
+
+    def _fallback_match(
+        self,
+        destination_text: str,
+        tracks: List[TrackedObject]
+    ) -> Optional[int]:
+        """
+        Simple fallback matching based on class name substring.
+
+        Args:
+            destination_text: User's spoken destination.
+            tracks: List of valid tracked objects.
+
+        Returns:
+            Track ID of best match, or furthest object if no match.
+        """
+        dest_lower = destination_text.lower()
+
+        # Try exact substring match
+        for t in tracks:
+            if t.class_name.lower() in dest_lower or dest_lower in t.class_name.lower():
+                logger.info(f"[DEST] Fallback matched '{destination_text}' -> {t.class_name} (track {t.track_id})")
+                return t.track_id
+
+        # No match - return furthest object
+        if tracks:
+            furthest = max(tracks, key=lambda t: t.get_current_depth())
+            logger.info(f"[DEST] No match for '{destination_text}', using furthest: {furthest.class_name}")
+            return furthest.track_id
+
+        return None
+
+
 class RoutePlanner:
     """
     Background route planner using Gemini vision.
@@ -55,10 +173,15 @@ class RoutePlanner:
         # Gemini client
         self.gemini = GeminiClient(api_key=api_key, model="gemini-2.5-flash-lite")
 
+        # Destination matcher for voice commands
+        self.destination_matcher = DestinationMatcher(self.gemini)
+
         # Thread-safe state
         self._current_route: Optional[PlannedRoute] = None
         self._last_good_route: Optional[PlannedRoute] = None  # Fallback route
         self._route_lock = threading.Lock()
+        self._target_destination: Optional[str] = None  # Voice-requested destination
+        self._target_track_id: Optional[int] = None  # Resolved target track ID
 
         # Input queue: (birdseye_image, tracks, timestamp)
         self._input_queue: Queue = Queue(maxsize=1)
@@ -74,6 +197,34 @@ class RoutePlanner:
         # Smoothing parameters
         self._min_similarity_to_keep = 0.5  # Keep old route if >50% similar
         self._min_waypoints_for_update = 2  # Need at least 2 waypoints to update
+
+    def set_destination(self, destination_text: str) -> None:
+        """
+        Set a voice-requested destination.
+
+        The next planning cycle will try to match this to a detected object.
+
+        Args:
+            destination_text: User's spoken destination (e.g., "the chair").
+        """
+        with self._route_lock:
+            self._target_destination = destination_text
+            self._target_track_id = None  # Will be resolved on next planning cycle
+            self._current_route = None  # Clear current route to force replanning
+            self._last_good_route = None
+        logger.info(f"[ROUTE] Destination set: '{destination_text}'")
+
+    def clear_destination(self) -> None:
+        """Clear voice-requested destination, return to furthest-object mode."""
+        with self._route_lock:
+            self._target_destination = None
+            self._target_track_id = None
+        logger.info("[ROUTE] Destination cleared, returning to furthest-object mode")
+
+    def get_current_destination(self) -> Optional[str]:
+        """Get the current voice-requested destination, if any."""
+        with self._route_lock:
+            return self._target_destination
 
     def start(self) -> None:
         """Start background planning thread."""
@@ -234,8 +385,24 @@ class RoutePlanner:
                 if elapsed < self.planning_interval:
                     time.sleep(self.planning_interval - elapsed)
 
-                # Plan route
-                new_route = self._plan_route(birdseye_image, tracks)
+                # Check for voice-requested destination that needs matching
+                with self._route_lock:
+                    destination = self._target_destination
+                    target_id = self._target_track_id
+
+                if destination and target_id is None:
+                    # Need to match destination to a track
+                    matched_id = self.destination_matcher.match_destination(
+                        destination, tracks, self.min_safe_distance_m
+                    )
+                    if matched_id is not None:
+                        with self._route_lock:
+                            self._target_track_id = matched_id
+                        target_id = matched_id
+                        logger.info(f"[ROUTE] Matched destination '{destination}' to track {matched_id}")
+
+                # Plan route (will use target_id if set)
+                new_route = self._plan_route(birdseye_image, tracks, target_track_id=target_id)
 
                 if new_route and new_route.waypoints:
                     # Ensure route is in depth order (nearest to furthest)
@@ -306,10 +473,16 @@ class RoutePlanner:
     def _plan_route(
         self,
         birdseye_image: np.ndarray,
-        tracks: List[TrackedObject]
+        tracks: List[TrackedObject],
+        target_track_id: Optional[int] = None
     ) -> Optional[PlannedRoute]:
         """
         Plan route using Gemini vision, with fallback to simple depth-based route.
+
+        Args:
+            birdseye_image: Bird's eye view image.
+            tracks: List of tracked objects.
+            target_track_id: Specific target track ID (from voice command), or None for furthest.
 
         Returns:
             PlannedRoute on success, fallback route if Gemini fails.
@@ -321,11 +494,27 @@ class RoutePlanner:
         if not visitable:
             return None
 
+        # Determine target track
+        target_track = None
+        if target_track_id is not None:
+            # Voice-requested specific target
+            target_track = next((t for t in visitable if t.track_id == target_track_id), None)
+            if target_track is None:
+                # Target track no longer visible - clear destination
+                logger.warning(f"[ROUTE] Target track {target_track_id} no longer visible")
+                with self._route_lock:
+                    self._target_destination = None
+                    self._target_track_id = None
+
+        if target_track is None:
+            # Default to furthest object
+            target_track = max(visitable, key=lambda t: t.get_current_depth())
+
         # Build prompt with track info (limits to 8 objects)
-        prompt = self._build_prompt(valid_tracks)
+        prompt = self._build_prompt(valid_tracks, target_track)
 
         if prompt is None:
-            return self._create_fallback_route(visitable)
+            return self._create_fallback_route(visitable, target_track)
 
         # Encode image
         image_b64 = self._encode_image(birdseye_image)
@@ -335,39 +524,57 @@ class RoutePlanner:
 
         if not response:
             logger.warning("[ROUTE] Gemini failed, using fallback")
-            return self._create_fallback_route(visitable)
+            return self._create_fallback_route(visitable, target_track)
 
         # Parse response
         result = self._parse_response(response, valid_tracks)
 
         if result is None or not result.waypoints:
             logger.warning("[ROUTE] Parse failed, using fallback")
-            return self._create_fallback_route(visitable)
+            return self._create_fallback_route(visitable, target_track)
 
-        # Ensure furthest object is the target
-        result = self._ensure_furthest_target(result, visitable)
+        # Ensure target is the final waypoint
+        result = self._ensure_target(result, visitable, target_track)
 
         return result
 
-    def _create_fallback_route(self, visitable_tracks: List[TrackedObject]) -> PlannedRoute:
+    def _create_fallback_route(
+        self,
+        visitable_tracks: List[TrackedObject],
+        target_track: Optional[TrackedObject] = None
+    ) -> PlannedRoute:
         """Create a simple depth-ordered route when Gemini fails."""
         if not visitable_tracks:
             return PlannedRoute(is_valid=False)
 
-        # Sort by depth (nearest first)
-        sorted_tracks = sorted(visitable_tracks, key=lambda t: t.get_current_depth())
+        # Determine target
+        if target_track is None:
+            target_track = max(visitable_tracks, key=lambda t: t.get_current_depth())
 
-        # Take up to 4 waypoints: nearest, one middle, and furthest
+        # Get tracks up to and including the target
+        target_depth = target_track.get_current_depth()
+        tracks_to_target = [t for t in visitable_tracks if t.get_current_depth() <= target_depth]
+
+        # Sort by depth (nearest first)
+        sorted_tracks = sorted(tracks_to_target, key=lambda t: t.get_current_depth())
+
+        # Take up to 4 waypoints: nearest, middle points, and target
         if len(sorted_tracks) <= 4:
             selected = sorted_tracks
         else:
-            # Pick nearest, furthest, and 2 evenly spaced in between
+            # Pick nearest, 2 evenly spaced in between, and target
             selected = [
                 sorted_tracks[0],
                 sorted_tracks[len(sorted_tracks) // 3],
                 sorted_tracks[2 * len(sorted_tracks) // 3],
-                sorted_tracks[-1]
             ]
+            # Ensure target is included
+            if target_track not in selected:
+                selected.append(target_track)
+
+        # Ensure target is last
+        selected = [t for t in selected if t.track_id != target_track.track_id]
+        selected.append(target_track)
 
         waypoints = []
         for i, t in enumerate(selected):
@@ -381,45 +588,44 @@ class RoutePlanner:
 
         return PlannedRoute(
             waypoints=waypoints,
-            target_id=waypoints[-1].track_id if waypoints else None,
+            target_id=target_track.track_id,
             is_valid=True
         )
 
-    def _ensure_furthest_target(
+    def _ensure_target(
         self,
         route: PlannedRoute,
-        visitable_tracks: List[TrackedObject]
+        visitable_tracks: List[TrackedObject],
+        target_track: TrackedObject
     ) -> PlannedRoute:
-        """Ensure the route ends at the furthest visitable object."""
+        """Ensure the route ends at the specified target object."""
         if not route.waypoints or not visitable_tracks:
             return route
 
-        # Find the furthest visitable object
-        furthest = max(visitable_tracks, key=lambda t: t.get_current_depth())
-        furthest_id = furthest.track_id
+        target_id = target_track.track_id
 
-        # Check if it's already the last waypoint
-        if route.waypoints[-1].track_id == furthest_id:
+        # Check if target is already the last waypoint
+        if route.waypoints[-1].track_id == target_id:
             return route
 
-        # Check if furthest is already in route
+        # Check if target is already in route
         route_ids = {w.track_id for w in route.waypoints}
 
-        if furthest_id in route_ids:
+        if target_id in route_ids:
             # Move it to the end
-            new_waypoints = [w for w in route.waypoints if w.track_id != furthest_id]
-            furthest_wp = next(w for w in route.waypoints if w.track_id == furthest_id)
-            furthest_wp.order = len(new_waypoints) + 1
-            new_waypoints.append(furthest_wp)
+            new_waypoints = [w for w in route.waypoints if w.track_id != target_id]
+            target_wp = next(w for w in route.waypoints if w.track_id == target_id)
+            target_wp.order = len(new_waypoints) + 1
+            new_waypoints.append(target_wp)
         else:
-            # Add it to the end
+            # Add target to the end
             new_waypoints = list(route.waypoints)
             new_waypoints.append(RouteWaypoint(
-                track_id=furthest_id,
-                class_name=furthest.class_name,
+                track_id=target_id,
+                class_name=target_track.class_name,
                 order=len(new_waypoints) + 1,
-                depth_m=furthest.get_current_depth(),
-                reasoning="furthest target"
+                depth_m=target_track.get_current_depth(),
+                reasoning="target"
             ))
 
         # Re-sort by depth to maintain order
@@ -427,9 +633,30 @@ class RoutePlanner:
         for i, wp in enumerate(new_waypoints):
             wp.order = i + 1
 
+        # Remove waypoints that are beyond the target depth
+        target_depth = target_track.get_current_depth()
+        new_waypoints = [w for w in new_waypoints if w.depth_m <= target_depth]
+
+        # Ensure target is still the last one
+        if not new_waypoints or new_waypoints[-1].track_id != target_id:
+            # Re-add target
+            new_waypoints = [w for w in new_waypoints if w.track_id != target_id]
+            new_waypoints.append(RouteWaypoint(
+                track_id=target_id,
+                class_name=target_track.class_name,
+                order=len(new_waypoints) + 1,
+                depth_m=target_track.get_current_depth(),
+                reasoning="target"
+            ))
+
+        # Re-sort and renumber
+        new_waypoints.sort(key=lambda w: w.depth_m)
+        for i, wp in enumerate(new_waypoints):
+            wp.order = i + 1
+
         return PlannedRoute(
             waypoints=new_waypoints,
-            target_id=furthest_id,
+            target_id=target_id,
             avoid_ids=route.avoid_ids,
             planning_notes=route.planning_notes,
             is_valid=True
@@ -445,45 +672,60 @@ class RoutePlanner:
         )
         return base64.b64encode(buffer).decode('utf-8')
 
-    def _build_prompt(self, tracks: List[TrackedObject]) -> str:
+    def _build_prompt(self, tracks: List[TrackedObject], target_track: TrackedObject) -> str:
         """Build Gemini prompt with track information."""
         # Limit to max 8 objects to avoid overwhelming Gemini
-        # Prioritize: furthest object + nearest visitable objects
-        visitable = [t for t in tracks if t.get_current_depth() >= self.min_safe_distance_m]
+        # Only include objects up to and including the target
+        target_depth = target_track.get_current_depth()
+        visitable = [t for t in tracks
+                    if t.get_current_depth() >= self.min_safe_distance_m
+                    and t.get_current_depth() <= target_depth]
         too_close = [t for t in tracks if t.get_current_depth() < self.min_safe_distance_m]
 
         if not visitable:
             # No visitable objects
             return None
 
-        # Sort by depth and take up to 7 nearest + always include furthest
+        # Sort by depth and take up to 7 nearest + always include target
         visitable_sorted = sorted(visitable, key=lambda t: t.get_current_depth())
-        furthest_track = visitable_sorted[-1]
 
-        # Take nearest 7 (or fewer) plus ensure furthest is included
+        # Take nearest 7 (or fewer) plus ensure target is included
         selected = visitable_sorted[:7]
-        if furthest_track not in selected:
-            selected.append(furthest_track)
+        if target_track not in selected:
+            selected.append(target_track)
 
         # Build simple object list - just ID and distance
         obj_list = []
         for t in selected:
-            marker = " [TARGET]" if t.track_id == furthest_track.track_id else ""
+            marker = " [TARGET]" if t.track_id == target_track.track_id else ""
             obj_list.append(f"  {t.track_id}: {t.class_name} at {t.get_current_depth():.1f}m{marker}")
 
         avoid_list = [str(t.track_id) for t in too_close[:3]]  # Limit avoid list too
 
-        return f"""Plan a route for a robot. Visit objects in order, ending at the TARGET.
+        return f"""Plan a safe route for a visually impaired person's navigation robot. Visit waypoints in order, ending at the TARGET.
 
 OBJECTS (id: type at distance):
 {chr(10).join(obj_list)}
 
 AVOID (too close): {', '.join(avoid_list) if avoid_list else 'none'}
 
-Reply with ONLY this JSON (no markdown, no explanation):
-{{"waypoints":[{{"id":{selected[0].track_id}}},{{"id":{furthest_track.track_id}}}]}}
+SAFETY RULES - Skip these as waypoints (but you can pass by them):
+- Moving objects: people, cars, bikes, animals (unpredictable movement)
+- Trip hazards: backpacks, bags, luggage on the ground
+- Unstable objects: bottles, cups, small items that could be knocked over
+- Sharp/dangerous: knives, scissors, glass
+- Hot surfaces: ovens, stoves, microwaves (if recently used)
+- Obstacles at leg height: chairs, stools, ottomans, low tables
 
-Replace the example with your actual route using the exact IDs above. Include 2-4 waypoints total, ending with {furthest_track.track_id}."""
+PREFER as waypoints:
+- Fixed/stable furniture: tables, desks, couches, beds, TVs
+- Large stable objects: refrigerators, doors, plants, shelves
+- Stationary landmarks: traffic lights, signs, benches
+
+Reply with ONLY this JSON (no markdown, no explanation):
+{{"waypoints":[{{"id":{selected[0].track_id}}},{{"id":{target_track.track_id}}}]}}
+
+Replace the example with your actual route using the exact IDs above. Include 2-4 waypoints total, ending with {target_track.track_id}. Only include safe, stable waypoints."""
 
     def _parse_response(
         self,

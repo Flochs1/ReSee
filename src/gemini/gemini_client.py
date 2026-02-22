@@ -144,6 +144,39 @@ class GeminiClient:
 
         return None
 
+    def generate(self, prompt: str) -> Optional[str]:
+        """
+        Generate text response from a text-only prompt.
+
+        Args:
+            prompt: Text prompt.
+
+        Returns:
+            Text response from Gemini, or None if failed.
+        """
+        try:
+            contents = [
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ]
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents
+            )
+
+            if response and response.text:
+                return response.text
+            else:
+                logger.warning("Empty response from Gemini")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error generating text: {e}")
+            return None
+
     def is_available(self) -> bool:
         """
         Check if Gemini API is available.

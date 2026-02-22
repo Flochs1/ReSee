@@ -22,6 +22,7 @@ from src.camera.stereo_capture import StereoCamera, StereoCameraError
 from src.camera.display import VideoDisplay
 from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
 from src.odometry import VisualOdometry, WorldState
+from src.voice import VoiceInterface, VOICE_AVAILABLE
 
 
 def parse_args():
@@ -88,6 +89,7 @@ class ReSeeApp:
         self.visual_odometry: Optional[VisualOdometry] = None
         self.world_state: Optional[WorldState] = None
         self.route_planner = None  # Initialized in initialize()
+        self.voice_interface: Optional[VoiceInterface] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -99,6 +101,7 @@ class ReSeeApp:
         self.detection_enabled = False
         self.odometry_enabled = False
         self.route_planning_enabled = False
+        self.voice_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -175,6 +178,10 @@ class ReSeeApp:
 
                     # Initialize route planner if Gemini is configured
                     self._initialize_route_planner()
+
+                    # Initialize voice interface if route planning is enabled
+                    if self.route_planning_enabled:
+                        self._initialize_voice()
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
 
@@ -368,6 +375,28 @@ class ReSeeApp:
             self.logger.warning(f"Failed to initialize route planner: {e}")
             return False
 
+    def _initialize_voice(self) -> bool:
+        """
+        Initialize voice interface for navigation commands.
+
+        Returns:
+            True if voice is ready, False otherwise.
+        """
+        if not VOICE_AVAILABLE:
+            self.logger.warning("Voice interface not available (missing dependencies)")
+            self.logger.info("Install with: pip install pyaudio SpeechRecognition openai-whisper")
+            return False
+
+        try:
+            self.voice_interface = VoiceInterface(use_whisper=True)
+            self.voice_interface.start()
+            self.voice_enabled = True
+            self.logger.info("Voice interface enabled (say 'Hey ReSee, take me to...')")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Voice interface not available: {e}")
+            return False
+
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
         self.logger.info("Starting stereo camera viewer...")
@@ -389,6 +418,10 @@ class ReSeeApp:
             self.logger.info("Route planning: ENABLED (Gemini)")
         else:
             self.logger.info("Route planning: DISABLED")
+        if self.voice_enabled:
+            self.logger.info("Voice control: ENABLED (say 'Hey ReSee, take me to...')")
+        else:
+            self.logger.info("Voice control: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         if self.odometry_enabled:
             self.logger.info("Press 'R' to reset odometry")
@@ -502,6 +535,13 @@ class ReSeeApp:
 
                         # Update route planner and draw route overlay
                         if self.route_planning_enabled and self.route_planner:
+                            # Check for voice destination requests
+                            if self.voice_enabled and self.voice_interface:
+                                destination = self.voice_interface.get_destination_request()
+                                if destination:
+                                    self.logger.info(f"Voice navigation request: '{destination}'")
+                                    self.route_planner.set_destination(destination)
+
                             # Send data to planner (non-blocking)
                             self.route_planner.update(birdseye_frame, tracks)
 
@@ -536,7 +576,15 @@ class ReSeeApp:
                     detection_status = " | Detection: ON" if self.detection_enabled else ""
                     odometry_status = " | VO: ON" if self.odometry_enabled else ""
                     route_status = " | Route: ON" if self.route_planning_enabled else ""
-                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}{odometry_status}{route_status}"
+
+                    # Show current voice destination if set
+                    dest_status = ""
+                    if self.route_planning_enabled and self.route_planner:
+                        current_dest = self.route_planner.get_current_destination()
+                        if current_dest:
+                            dest_status = f" | Dest: {current_dest}"
+
+                    status = f"Frames: {frame_count} | Elapsed: {elapsed:.1f}s{depth_status}{detection_status}{odometry_status}{route_status}{dest_status}"
 
                     self.display.show_frame(
                         combined_frame,
@@ -584,6 +632,10 @@ class ReSeeApp:
     def cleanup(self) -> None:
         """Cleanup all resources."""
         self.logger.info("Cleaning up resources...")
+
+        # Shutdown voice interface
+        if self.voice_interface:
+            self.voice_interface.shutdown()
 
         # Stop route planner
         if self.route_planner:

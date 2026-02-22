@@ -221,7 +221,7 @@ def draw_route(
     global _flowing_curve, _nav_voice
 
     if _flowing_curve is None:
-        _flowing_curve = FlowingCurve(num_points=80, smoothing=0.06)
+        _flowing_curve = FlowingCurve(num_points=80, smoothing=0.18)
 
     if _nav_voice is None:
         _nav_voice = NavigationVoice(interval=1.0)
