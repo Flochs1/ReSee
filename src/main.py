@@ -84,7 +84,6 @@ class ReSeeApp:
         self.calibrator: Optional[StereoCalibrator] = None
         self.detection_pipeline = None  # Initialized in initialize()
         self.birdseye_view = None  # Initialized in initialize()
-        self.world_map = None  # Initialized in initialize()
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -160,18 +159,13 @@ class ReSeeApp:
             # Initialize detection pipeline if enabled
             if not self.no_detection:
                 self._initialize_detection()
-                # Initialize bird's eye view and world map if detection is enabled
+                # Initialize bird's eye view if detection is enabled
                 if self.detection_enabled:
-                    from src.detection import BirdsEyeView, WorldMap
+                    from src.detection import BirdsEyeView
                     self.birdseye_view = BirdsEyeView(
                         max_depth_m=15.0  # Always show 15m range
                     )
-                    self.world_map = WorldMap(
-                        fov_degrees=75.0,
-                        anchor_persistence_seconds=5.0,
-                        heading_smoothing=0.1
-                    )
-                    self.logger.info("Bird's eye view with world tracking enabled")
+                    self.logger.info("Bird's eye view enabled")
             else:
                 self.logger.info("Object detection disabled by --no-detection flag")
 
@@ -371,21 +365,11 @@ class ReSeeApp:
                         combined_frame = stereo_combined
 
                     # Add bird's eye view if detection is enabled (always show, even with no objects)
-                    if self.birdseye_view and self.world_map:
-                        # Update world map with tracked objects
-                        current_time = time.monotonic()
-                        world_objects = self.world_map.update(
+                    if self.birdseye_view:
+                        # Render bird's eye view
+                        birdseye_frame = self.birdseye_view.render(
                             tracks,
-                            frame_width=target_w,
-                            timestamp=current_time
-                        )
-                        camera_state = self.world_map.get_camera_state()
-
-                        # Render world-fixed bird's eye view
-                        birdseye_frame = self.birdseye_view.render_world(
-                            world_objects,
-                            camera_state,
-                            current_time=current_time
+                            frame_width=target_w
                         )
                         # Scale bird's eye view to match combined frame width
                         combined_width = combined_frame.shape[1]
