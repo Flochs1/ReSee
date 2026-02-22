@@ -1,12 +1,96 @@
 """Route visualization on bird's eye view with smooth flowing curves."""
 
 import math
+import time
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 
 from .route_types import PlannedRoute
 from src.detection.object_tracker import TrackedObject
+from .tts_output import TTSOutput
+
+
+class NavigationVoice:
+    """
+    Speaks navigation directions based on curve heading.
+    """
+
+    def __init__(self, interval: float = 1.0):
+        """
+        Args:
+            interval: Minimum seconds between voice commands
+        """
+        self.interval = interval
+        self.tts = TTSOutput(voice="Samantha", rate=220, enabled=True)
+        self._last_speak_time = 0.0
+        self._last_command = ""
+
+    def update(self, curve: np.ndarray, center_x: int, center_y: int) -> Optional[str]:
+        """
+        Determine and speak navigation direction based on curve.
+
+        Args:
+            curve: The route curve points
+            center_x, center_y: Camera/user position
+
+        Returns:
+            The spoken command, or None if not spoken
+        """
+        now = time.time()
+        if now - self._last_speak_time < self.interval:
+            return None
+
+        if len(curve) < 10:
+            return None
+
+        # Get direction from curve near the start (where user should head)
+        # Sample a point ~20% along the curve for immediate direction
+        sample_idx = min(len(curve) // 5, len(curve) - 1)
+        target_point = curve[sample_idx]
+
+        # Calculate angle from user to this point
+        dx = target_point[0] - center_x
+        dy = center_y - target_point[1]  # Flip Y since screen Y is inverted
+
+        # Angle in degrees (0 = forward/up, positive = right, negative = left)
+        angle_rad = math.atan2(dx, dy)
+        angle_deg = math.degrees(angle_rad)
+
+        # Determine command based on angle
+        command = self._angle_to_command(angle_deg)
+
+        # Speak if different from last or enough time passed
+        if command != self._last_command or now - self._last_speak_time > 3.0:
+            self.tts.speak(command, priority="normal")
+            self._last_speak_time = now
+            self._last_command = command
+            return command
+
+        return None
+
+    def _angle_to_command(self, angle_deg: float) -> str:
+        """Convert angle to navigation command."""
+        # Angle: 0 = forward, +ve = right, -ve = left
+        abs_angle = abs(angle_deg)
+
+        if abs_angle < 10:
+            return "walk forward"
+        elif abs_angle < 30:
+            if angle_deg > 0:
+                return "bear right"
+            else:
+                return "bear left"
+        elif abs_angle < 60:
+            if angle_deg > 0:
+                return "turn right"
+            else:
+                return "turn left"
+        else:
+            if angle_deg > 0:
+                return "sharp right"
+            else:
+                return "sharp left"
 
 
 class FlowingCurve:
@@ -116,8 +200,9 @@ class FlowingCurve:
         self._curve = None
 
 
-# Global curve instance
+# Global instances
 _flowing_curve: Optional[FlowingCurve] = None
+_nav_voice: Optional[NavigationVoice] = None
 
 
 def draw_route(
@@ -133,10 +218,13 @@ def draw_route(
     """
     Draw planned route on bird's eye view.
     """
-    global _flowing_curve
+    global _flowing_curve, _nav_voice
 
     if _flowing_curve is None:
         _flowing_curve = FlowingCurve(num_points=80, smoothing=0.06)
+
+    if _nav_voice is None:
+        _nav_voice = NavigationVoice(interval=1.0)
 
     if not route or not route.is_valid or not route.waypoints:
         return view
@@ -164,6 +252,9 @@ def draw_route(
 
     # Get smoothly flowing curve
     curve = _flowing_curve.update(start, end, intermediates)
+
+    # Speak navigation direction
+    _nav_voice.update(curve, center_x, center_y)
 
     # Draw the curve
     _draw_curve(view, curve)
@@ -312,6 +403,7 @@ def _draw_status(view: np.ndarray, route: PlannedRoute) -> None:
 
 def reset_smooth_path():
     """Reset curve state."""
-    global _flowing_curve
+    global _flowing_curve, _nav_voice
     if _flowing_curve:
         _flowing_curve.reset()
+    _nav_voice = None
