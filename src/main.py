@@ -387,14 +387,19 @@ class ReSeeApp:
                         )
 
                     # Process visual odometry if enabled
+                    tracking_state = "normal"
                     if self.odometry_enabled and self.visual_odometry and depth_map is not None:
                         R, t, vo_success = self.visual_odometry.process_frame(
                             left_resized, depth_map
                         )
+
                         if vo_success:
                             vo_pos = self.visual_odometry.get_position()
                             vo_heading = self.visual_odometry.get_heading()
                             self.world_state.update_pose(R, t, vo_pos, vo_heading)
+
+                        # Get tracking state (normal or panic)
+                        tracking_state = "normal" if self.visual_odometry.is_tracking() else "panic"
 
                     # Process detection if enabled
                     tracks = []
@@ -437,7 +442,8 @@ class ReSeeApp:
                             tracks,
                             frame_width=target_w,
                             camera_pose=camera_pose,
-                            trajectory=trajectory
+                            trajectory=trajectory,
+                            tracking_state=tracking_state
                         )
                         # Scale bird's eye view to match combined frame width
                         combined_width = combined_frame.shape[1]

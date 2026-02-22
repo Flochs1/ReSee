@@ -1,0 +1,55 @@
+# Navigation Configuration for Visually Impaired Assistance
+
+navigation:
+  # Enable navigation assistance (use --navigation flag)
+  enabled: false
+
+  # Camera field of view in degrees
+  fov_degrees: 75.0
+
+  # Center corridor width (total degrees, +/- half)
+  # Objects in this corridor are "directly ahead"
+  center_corridor_degrees: 30.0
+
+  # Danger zone distances (meters)
+  danger_zones:
+    danger_m: 1.5    # URGENT: Stop immediately
+    warning_m: 3.0   # WARNING: Close obstacle, may need to avoid
+    caution_m: 5.0   # CAUTION: Be aware of obstacle
+
+  # Text-to-speech settings
+  tts:
+    # macOS voice (run `say -v ?` to list available voices)
+    voice: "Samantha"
+
+    # Speech rate in words per minute
+    rate: 200
+
+    # Minimum interval between messages (seconds)
+    min_interval_seconds: 2.0
+
+    # Interval for "path clear" messages when walking (seconds)
+    continuous_interval_seconds: 3.0
+
+  # Motion detection thresholds
+  motion:
+    # Speed below which user is considered stationary (m/s)
+    stationary_threshold_mps: 0.05
+
+    # Speed above which user is considered walking (m/s)
+    walking_threshold_mps: 0.1
+
+    # Rotation rate for turning detection (degrees/second)
+    turning_threshold_dps: 15.0
+
+  # Object classes that warrant more prominent warnings
+  priority_classes:
+    - person
+    - car
+    - bicycle
+    - motorcycle
+    - dog
+    - truck
+    - bus
+    - cat
+    - horse

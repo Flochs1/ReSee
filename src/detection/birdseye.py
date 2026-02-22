@@ -1,6 +1,7 @@
 """Bird's eye view visualization of detected objects with visual odometry support."""
 
 import math
+import time
 import cv2
 import numpy as np
 from typing import List, Optional
@@ -64,12 +65,16 @@ class BirdsEyeView:
         }
         self.default_color = (128, 128, 128)  # Gray
 
+        # Animation state for pulsing effects
+        self._pulse_phase = 0.0
+
     def render(
         self,
         tracks: List[TrackedObject],
         frame_width: int,
         camera_pose=None,
-        trajectory: Optional[deque] = None
+        trajectory: Optional[deque] = None,
+        tracking_state: str = "normal"
     ) -> np.ndarray:
         """
         Render bird's eye view of tracked objects.
@@ -82,10 +87,13 @@ class BirdsEyeView:
             frame_width: Width of the source camera frame (for X mapping).
             camera_pose: Optional CameraPose for world-coordinate rendering.
             trajectory: Optional deque of CameraPose for trajectory visualization.
+            tracking_state: Tracking state ("normal", "degraded", "panic", "recovering").
 
         Returns:
             BGR image of the bird's eye view.
         """
+        # Update pulse animation
+        self._pulse_phase = (time.time() * 4) % (2 * math.pi)
         # Create dark background
         view = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         view[:] = (30, 30, 30)  # Dark gray background
@@ -111,8 +119,8 @@ class BirdsEyeView:
         if camera_pose is not None:
             self._draw_compass(view, heading)
 
-        # Draw camera indicator
-        self._draw_camera_indicator(view, center_x, center_y)
+        # Draw camera indicator with tracking state
+        self._draw_camera_indicator(view, center_x, center_y, tracking_state)
 
         # Render each tracked object
         for track in tracks:
@@ -230,28 +238,71 @@ class BirdsEyeView:
         right_y = int(center_y - line_length * math.cos(right_angle))
         cv2.line(view, (center_x, center_y), (right_x, right_y), (80, 80, 80), 1)
 
-    def _draw_camera_indicator(self, view: np.ndarray, center_x: int, center_y: int) -> None:
-        """Draw camera position and heading indicator (facing up/north)."""
-        # Camera body (circle)
-        cv2.circle(view, (center_x, center_y), 10, (255, 255, 255), -1)
+    def _draw_camera_indicator(
+        self,
+        view: np.ndarray,
+        center_x: int,
+        center_y: int,
+        tracking_state: str = "normal"
+    ) -> None:
+        """
+        Draw camera position and heading indicator with tracking state visualization.
 
-        # Heading arrow (points up - camera's forward direction)
-        arrow_length = 25
-        arrow_x = center_x
-        arrow_y = center_y - arrow_length
+        States:
+        - NORMAL: White circle + green arrow
+        - PANIC: Pulsing red ring + "?" symbol + "LOST" label
+        """
+        # Calculate pulse intensity (0.5 to 1.0)
+        pulse = 0.5 + 0.5 * abs(math.sin(self._pulse_phase))
 
-        cv2.arrowedLine(
-            view,
-            (center_x, center_y),
-            (arrow_x, arrow_y),
-            (0, 255, 0),  # Green arrow
-            2,
-            tipLength=0.4
-        )
+        if tracking_state == "panic":
+            # PANIC: Red pulsing ring with "?" and "LOST"
+            ring_radius = int(15 + 5 * pulse)
+            ring_color = (0, 0, int(255 * pulse))  # Pulsing red
 
-        # Label
-        cv2.putText(view, "CAM", (center_x - 15, center_y + 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            # Outer pulsing ring
+            cv2.circle(view, (center_x, center_y), ring_radius, ring_color, 3)
+
+            # Inner dark circle
+            cv2.circle(view, (center_x, center_y), 10, (40, 40, 40), -1)
+            cv2.circle(view, (center_x, center_y), 10, ring_color, 2)
+
+            # Question mark symbol
+            cv2.putText(
+                view, "?",
+                (center_x - 5, center_y + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
+            )
+
+            # "LOST" label
+            cv2.putText(
+                view, "LOST",
+                (center_x - 18, center_y + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2
+            )
+
+        else:
+            # NORMAL: White circle + green arrow
+            cv2.circle(view, (center_x, center_y), 12, (100, 100, 100), 1)
+            cv2.circle(view, (center_x, center_y), 10, (255, 255, 255), -1)
+
+            # Green heading arrow
+            arrow_length = 25
+            cv2.arrowedLine(
+                view,
+                (center_x, center_y),
+                (center_x, center_y - arrow_length),
+                (0, 255, 0),  # Green arrow
+                2,
+                tipLength=0.4
+            )
+
+            # Label
+            cv2.putText(
+                view, "CAM",
+                (center_x - 15, center_y + 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+            )
 
     def _draw_trajectory(
         self,
