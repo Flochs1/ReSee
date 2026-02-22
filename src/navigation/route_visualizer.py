@@ -16,8 +16,6 @@ FLOOR_CLASSES = {'floor', 'ground', 'carpet', 'rug', 'mat'}
 # Classes that are typically walls/fixed structures (avoid only if directly ahead)
 WALL_CLASSES = {'wall', 'door', 'window', 'pillar', 'column'}
 
-# DANGEROUS: Roads should be avoided at all costs
-ROAD_CLASSES = {'road', 'street', 'pavement', 'asphalt', 'highway', 'lane', 'crosswalk'}
 
 
 class NavigationVoice:
@@ -271,18 +269,8 @@ class ProximityAnalyzer:
             norm_x = bbox_center_x / frame_width
             angle = (norm_x - 0.5) * fov_rad  # negative = left, positive = right
 
-            # ROADS are dangerous - trigger emergency earlier
-            is_road = class_lower in ROAD_CLASSES
-            if is_road:
-                # Roads trigger emergency at 2m (earlier than other obstacles)
-                road_emergency_range = 2.0
-                if depth < road_emergency_range and abs(angle) < self.CENTER_ANGLE_THRESHOLD * 1.5:
-                    # Road is highest priority emergency
-                    if emergency_obstacle is None or is_road:
-                        emergency_obstacle = (depth, angle, class_lower)
-
             # Check for emergency obstacle (< 1m and in front)
-            if depth < self.EMERGENCY_RANGE and not is_road:
+            if depth < self.EMERGENCY_RANGE:
                 # Is it in front of us (within center cone)?
                 if abs(angle) < self.CENTER_ANGLE_THRESHOLD:
                     # Skip walls unless directly centered
@@ -295,10 +283,6 @@ class ProximityAnalyzer:
 
             # Accumulate proximity for soft deviation (inverse depth weighting)
             proximity_weight = 1.0 / depth
-
-            # Roads get same weight as other obstacles (emergency triggers earlier instead)
-            # if is_road:
-            #     proximity_weight *= 1.0
 
             # Weight more heavily for objects closer to center (more dangerous)
             center_weight = 1.0 - (abs(angle) / (fov_rad / 2)) * 0.5
