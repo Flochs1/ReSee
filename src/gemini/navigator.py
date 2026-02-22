@@ -22,6 +22,7 @@ class TriggerType(Enum):
     ROUTINE = "ROUTINE"
     DANGER_CLOSE = "DANGER_CLOSE"
     DANGER_APPROACHING = "DANGER_APPROACHING"
+    USER_REQUEST = "USER_REQUEST"
 
 
 @dataclass
@@ -198,10 +199,10 @@ class RelativeApproachTracker:
 
     Calculates relative speed = object closing speed - user speed.
     Only mobile objects (people, vehicles, animals) are considered threats.
-    Objects that haven't changed in 3 frames are ignored.
+    Objects that haven't changed in 7 frames are ignored.
     """
 
-    def __init__(self, history_size: int = 10):
+    def __init__(self, history_size: int = 15):
         """
         Initialize relative approach tracker.
 
@@ -279,7 +280,7 @@ class RelativeApproachTracker:
 
     def has_changed_recently(self, track_id: int, min_change: float = 0.1) -> bool:
         """
-        Check if object's depth has changed meaningfully in last 3 samples.
+        Check if object's depth has changed meaningfully in last 7 samples.
 
         Args:
             track_id: The track ID to check.
@@ -292,14 +293,14 @@ class RelativeApproachTracker:
             return False
 
         history = list(self.track_history[track_id])
-        if len(history) < 3:
+        if len(history) < 7:
             return True  # Not enough data, assume it could be changing
 
-        # Check last 3 samples
-        recent = history[-3:]
+        # Check last 7 samples
+        recent = history[-7:]
         depths = [s['depth'] for s in recent if s['depth'] > 0]
 
-        if len(depths) < 2:
+        if len(depths) < 4:
             return True  # Not enough valid depth data
 
         # Check if depth has changed
@@ -330,14 +331,14 @@ class RelativeApproachTracker:
         self,
         track_id: int,
         threshold: float = 0.2,
-        min_samples: int = 3
+        min_samples: int = 7
     ) -> bool:
         """
         Check if a mobile object is actively approaching us.
 
         Only returns True if:
         1. Object is a mobile class (can move on its own)
-        2. Object has changed position in last 3 frames
+        2. Object has changed position in last 7 frames
         3. Relative speed is above threshold for recent samples
 
         Args:
@@ -375,6 +376,38 @@ class RelativeApproachTracker:
 
         return True
 
+    def is_monotonically_approaching(self, track_id: int, min_samples: int = 4) -> bool:
+        """
+        Check if object depth is monotonically decreasing (consistently getting closer).
+
+        Args:
+            track_id: The track ID to check.
+            min_samples: Number of samples to check for monotonic decrease.
+
+        Returns:
+            True if depth is consistently decreasing over the last min_samples.
+        """
+        if track_id not in self.track_history:
+            return False
+
+        history = list(self.track_history[track_id])
+        if len(history) < min_samples:
+            return False
+
+        # Get last min_samples depths
+        recent = history[-min_samples:]
+        depths = [s['depth'] for s in recent if s['depth'] > 0]
+
+        if len(depths) < min_samples:
+            return False
+
+        # Check if each depth is less than the previous (getting closer)
+        for i in range(1, len(depths)):
+            if depths[i] >= depths[i - 1]:
+                return False  # Not monotonically decreasing
+
+        return True
+
 
 class GeminiNavigator:
     """
@@ -394,7 +427,8 @@ class GeminiNavigator:
         user_goal: str = "moving forward",
         routine_interval: float = 1.0,
         danger_zone_m: float = 5.0,
-        closing_speed_threshold: float = 0.5
+        closing_speed_threshold: float = 0.5,
+        enable_routine: bool = True
     ):
         """
         Initialize Gemini Navigator.
@@ -405,10 +439,12 @@ class GeminiNavigator:
             routine_interval: Seconds between routine updates.
             danger_zone_m: Distance threshold for alerts when moving (meters).
             closing_speed_threshold: Approaching speed for immediate alerts (m/s).
+            enable_routine: Enable periodic routine updates (heartbeat).
         """
         self.client = GeminiClient(api_key=api_key)
         self.user_goal = user_goal
         self.routine_interval = routine_interval
+        self.enable_routine = enable_routine
 
         # Trigger thresholds
         self.danger_zone_m = danger_zone_m
@@ -433,20 +469,38 @@ class GeminiNavigator:
         # Timing
         self.last_call_time = 0.0
 
-        # History tracking (last 3 frames/responses)
-        self.object_history: deque = deque(maxlen=3)  # List of object descriptions per frame
-        self.situation_history: deque = deque(maxlen=3)  # Previous Gemini responses
+        # History tracking (last 7 frames/responses for consistency)
+        self.object_history: deque = deque(maxlen=7)  # List of object descriptions per frame
+        self.situation_history: deque = deque(maxlen=7)  # Previous Gemini responses
 
         # Background execution (non-blocking)
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.pending_future: Optional[Future] = None
         self.pending_trigger: Optional[TriggerInfo] = None
 
+        # Voice interface (optional)
+        self.voice_interface = None
+        self.pending_voice_query: Optional[str] = None
+
+        # Current frame storage for user requests (annotated + depth)
+        self.current_annotated_frame: Optional[np.ndarray] = None
+        self.current_depth_colored: Optional[np.ndarray] = None
+
         logger.info(
             f"Gemini Navigator initialized "
             f"(interval={routine_interval}s, danger={danger_zone_m}m, "
             f"speed_threshold={closing_speed_threshold}m/s)"
         )
+
+    def set_voice_interface(self, voice_interface) -> None:
+        """
+        Set voice interface for TTS and speech recognition.
+
+        Args:
+            voice_interface: VoiceInterface instance.
+        """
+        self.voice_interface = voice_interface
+        logger.info("Voice interface connected to navigator")
 
     def _get_zone(self, bbox: Tuple[int, int, int, int], frame_width: int) -> str:
         """Get which zone an object is in: left, center, or right."""
@@ -515,7 +569,8 @@ class GeminiNavigator:
         """
         Check if we should trigger a Gemini call.
 
-        Trigger conditions:
+        Trigger conditions (in priority order):
+        0. USER_REQUEST: Voice query from user (highest priority)
         1. DANGER_CLOSE: User is moving AND object in center zone < danger_zone_m
         2. DANGER_APPROACHING: Object is persistently approaching AND in center zone
         3. ROUTINE: 1-second interval for regular updates
@@ -528,6 +583,16 @@ class GeminiNavigator:
         Returns:
             Tuple of (should_trigger, TriggerInfo or None).
         """
+        # Voice query takes highest priority
+        if self.pending_voice_query:
+            query = self.pending_voice_query
+            self.pending_voice_query = None
+            return True, TriggerInfo(
+                trigger_type=TriggerType.USER_REQUEST,
+                reason=f"User request: {query}",
+                object_name=None
+            )
+
         ctx = self.nav_context
 
         # Check for DANGER_CLOSE: User moving + obstacle in path within danger zone
@@ -556,8 +621,13 @@ class GeminiNavigator:
             # Get relative approach speed (accounts for our own movement)
             relative_speed = self.approach_tracker.get_relative_speed(track.track_id)
 
-            # Check if object is actively approaching (mobile, changed recently, consistent)
-            if self.approach_tracker.is_actively_approaching(track.track_id):
+            # Require 7 frames of consistent approaching behavior before warning
+            if not ctx.is_moving:
+                if not self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=7):
+                    continue  # Skip warning - not consistently getting closer over 7 frames
+
+            # Check if object is actively approaching (mobile, changed recently, consistent over 7 frames)
+            if self.approach_tracker.is_actively_approaching(track.track_id, min_samples=7):
                 return True, TriggerInfo(
                     trigger_type=TriggerType.DANGER_APPROACHING,
                     reason=f"{track.class_name} actively approaching",
@@ -567,17 +637,19 @@ class GeminiNavigator:
                 )
 
             # Also trigger for fast relative approach (even if not persistent yet)
+            # But only if moving, or if monotonically approaching over 7 frames when stationary
             if relative_speed > self.closing_speed_threshold:
-                return True, TriggerInfo(
-                    trigger_type=TriggerType.DANGER_APPROACHING,
-                    reason=f"{track.class_name} approaching fast",
-                    object_name=track.class_name,
-                    distance=depth,
-                    speed=relative_speed
-                )
+                if ctx.is_moving or self.approach_tracker.is_monotonically_approaching(track.track_id, min_samples=7):
+                    return True, TriggerInfo(
+                        trigger_type=TriggerType.DANGER_APPROACHING,
+                        reason=f"{track.class_name} approaching fast",
+                        object_name=track.class_name,
+                        distance=depth,
+                        speed=relative_speed
+                    )
 
-        # Routine trigger
-        if current_time - self.last_call_time >= self.routine_interval:
+        # Routine trigger (if enabled)
+        if self.enable_routine and current_time - self.last_call_time >= self.routine_interval:
             return True, TriggerInfo(
                 trigger_type=TriggerType.ROUTINE,
                 reason="Scheduled update"
@@ -615,6 +687,41 @@ class GeminiNavigator:
 
         return ", ".join(lines)
 
+    def _format_objects_natural(self, tracks: List, frame_width: int) -> str:
+        """Format current objects in natural language (no distances)."""
+        if not tracks:
+            return "The area appears clear, no objects detected."
+
+        # Group by zone
+        left_objs = []
+        center_objs = []
+        right_objs = []
+
+        for track in tracks:
+            zone = self._get_zone(track.bbox, frame_width)
+            name = track.class_name.lower()
+
+            # Make it more natural
+            if name == "person":
+                name = "someone"
+
+            if zone == "left":
+                left_objs.append(name)
+            elif zone == "right":
+                right_objs.append(name)
+            else:
+                center_objs.append(name)
+
+        lines = []
+        if center_objs:
+            lines.append(f"Ahead: {', '.join(center_objs)}")
+        if left_objs:
+            lines.append(f"To the left: {', '.join(left_objs)}")
+        if right_objs:
+            lines.append(f"To the right: {', '.join(right_objs)}")
+
+        return "\n".join(lines) if lines else "Nothing notable detected"
+
     def build_prompt(
         self,
         trigger: TriggerInfo,
@@ -640,18 +747,59 @@ class GeminiNavigator:
         else:
             motion_status = "Stationary"
 
+        # Handle USER_REQUEST with special prompt
+        if trigger.trigger_type == TriggerType.USER_REQUEST:
+            # Extract the actual question from reason
+            user_question = trigger.reason.replace("User request: ", "")
+
+            # Build history context (7 frames for consistency)
+            history_text = ""
+            if self.object_history:
+                history_lines = []
+                for i, obj_desc in enumerate(self.object_history):
+                    history_lines.append(f"  Frame -{len(self.object_history) - i}: {obj_desc}")
+                history_text = "\n".join(history_lines)
+            else:
+                history_text = "  No previous frames"
+
+            # Current objects (without distances for natural response)
+            current_objects = self._format_objects_natural(tracks, frame_width)
+
+            return f"""You are a friendly assistant helping a visually impaired person understand their surroundings. They asked: "{user_question}"
+
+IMAGE: Camera view with object detection boxes (top) and depth heatmap (bottom, red=close, blue=far).
+
+WHAT I SEE NOW:
+{current_objects}
+
+RECENT HISTORY (last 7 frames - use for consistency):
+{history_text}
+
+IMPORTANT RULES:
+- Answer naturally, like a helpful friend would
+- Describe ONLY what you actually see in the image - never guess or hallucinate
+- Do NOT mention distances in meters unless the user specifically asked about distance
+- Focus on describing the scene, objects, colors, what's happening
+- If you see a "person" label in detection, say "someone" or "a person" - don't invent details about them
+- Be conversational and warm, not robotic
+
+RESPOND IN THIS EXACT FORMAT:
+STATE: {motion_status}
+REASON: User question
+ACTION: [Your natural, friendly answer to their question based on what you see]"""
+
         # Reason for call
         if trigger.trigger_type == TriggerType.DANGER_CLOSE:
-            reason = f"Warning: {trigger.object_name} at {trigger.distance:.1f}m ahead"
+            reason = f"Something close ahead"
         elif trigger.trigger_type == TriggerType.DANGER_APPROACHING:
-            reason = f"Warning: {trigger.object_name} approaching"
+            reason = f"Something approaching"
         else:
-            reason = "Routine update"
+            reason = "Routine check"
 
         # Current zone status
         zone_status = f"Left: {self._format_zone_status(ctx.left_zone, 'L')}, Center: {self._format_zone_status(ctx.center_zone, 'C')}, Right: {self._format_zone_status(ctx.right_zone, 'R')}"
 
-        # Build history context
+        # Build history context (7 frames)
         history_text = ""
         if self.object_history:
             history_lines = []
@@ -668,37 +816,47 @@ class GeminiNavigator:
         else:
             prev_situations = "  No previous updates"
 
-        # Current objects
-        current_objects = self._format_objects_for_history(tracks, frame_width)
+        # Current objects (natural format)
+        current_objects = self._format_objects_natural(tracks, frame_width)
 
-        prompt = f"""You are a calm navigation assistant for a visually impaired person walking outdoors.
+        # Stationary-specific guidance
+        if ctx.is_moving:
+            action_guidance = """- Speak naturally like a friend giving directions
+- "Maybe step a bit to the left" or "There's something ahead, careful"
+- "You're good, path is clear" or "All clear ahead"
+- Only warn if something is actually close (within 2 meters) and in your path"""
+        else:
+            action_guidance = """- You're standing still, so DON'T say "stop" or "slow down" - you're already stopped!
+- "There's something in front of you" or "Someone's nearby on your left"
+- "All clear when you're ready to go" or "Path looks good"
+- Speak naturally like a helpful friend"""
 
-CURRENT STATE:
-- State: {motion_status}
-- Reason: {reason}
+        prompt = f"""You're helping a visually impaired friend navigate. Be warm and natural, like a real person.
+
+RIGHT NOW:
+- {"Walking forward" if ctx.is_moving else "Standing still"}
+- Why I'm telling you: {reason}
 - Zones: {zone_status}
 
-OBJECT HISTORY (last 3 frames):
+WHAT I SEE:
+{current_objects}
+
+LAST 7 FRAMES (for consistency - only mention things that persist):
 {history_text}
 
-CURRENT OBJECTS:
-  {current_objects}
-
-PREVIOUS RESPONSES:
+MY RECENT GUIDANCE:
 {prev_situations}
 
-RESPOND IN THIS EXACT FORMAT (3 lines only):
-STATE: {motion_status}
-REASON: [Brief reason - "Routine" or "Warning: what's happening"]
-ACTION: [Only if truly needed: "Step left/right" or "Slow down" or "Stop". Otherwise leave empty or say "Continue"]
+RESPOND IN THIS FORMAT:
+STATE: {"Moving" if ctx.is_moving else "Stationary"}
+REASON: [Very brief - what triggered this]
+ACTION: [Natural, friendly guidance - or "All clear" if nothing to worry about]
 
-GUIDELINES:
-- Be calm and reassuring, not alarming
-- Only suggest action if object is <2m AND in center path
-- Objects >3m away generally don't need action yet
-- Prefer gentle guidance ("step slightly left") over urgent commands
-- If path ahead is reasonably clear, no action needed
-- Consider if situation is actually dangerous before warning"""
+HOW TO RESPOND:
+{action_guidance}
+- Be consistent with what you've said before (check history)
+- Don't be alarming - stay calm and friendly
+- If path is clear, just say so warmly"""
 
         return prompt
 
@@ -746,6 +904,17 @@ GUIDELINES:
             right_zone=right_zone
         )
 
+        # Store current frames for potential user request (annotated frame + depth)
+        self.current_annotated_frame = left_frame.copy()
+        self.current_depth_colored = depth_colored.copy() if depth_colored is not None else None
+
+        # Check for voice query from voice interface
+        if self.voice_interface:
+            query = self.voice_interface.get_voice_query()
+            if query:
+                self.pending_voice_query = query
+                logger.info(f"Voice query received: {query}")
+
         # Check for completed response
         if self.pending_future is not None and self.pending_future.done():
             try:
@@ -756,6 +925,13 @@ GUIDELINES:
             finally:
                 self.pending_future = None
                 self.pending_trigger = None
+
+        # User queries always have priority - cancel pending call if voice query waiting
+        if self.pending_voice_query and self.pending_future is not None:
+            logger.debug("Cancelling pending call for user query priority")
+            self.pending_future.cancel()
+            self.pending_future = None
+            self.pending_trigger = None
 
         # Check if we should start a new call
         if self.pending_future is not None:
@@ -773,13 +949,32 @@ GUIDELINES:
         current_objects = self._format_objects_for_history(tracks, frame_width)
         self.object_history.append(current_objects)
 
-        # Build prompt (text only, no image)
+        # Build prompt
         prompt = self.build_prompt(trigger, tracks, frame_width)
 
-        # Submit to background thread (text-only call)
-        self.pending_future = self.executor.submit(
-            self._call_gemini_text, prompt
-        )
+        # For USER_REQUEST, include annotated image with depth heatmap
+        if trigger.trigger_type == TriggerType.USER_REQUEST:
+            image_base64 = self._prepare_image(
+                self.current_annotated_frame,
+                self.current_depth_colored,
+                include_depth=True
+            )
+            if image_base64:
+                self.pending_future = self.executor.submit(
+                    self._call_gemini_with_image, prompt, image_base64
+                )
+                logger.debug("Gemini call with image submitted (USER_REQUEST)")
+            else:
+                # Fallback to text-only if image prep fails
+                self.pending_future = self.executor.submit(
+                    self._call_gemini_text, prompt
+                )
+        else:
+            # Other triggers use text-only
+            self.pending_future = self.executor.submit(
+                self._call_gemini_text, prompt
+            )
+
         self.pending_trigger = trigger
         self.last_call_time = timestamp
 
@@ -789,21 +984,39 @@ GUIDELINES:
     def _prepare_image(
         self,
         left_frame: np.ndarray,
-        depth_colored: Optional[np.ndarray]
+        depth_colored: Optional[np.ndarray],
+        include_depth: bool = False
     ) -> Optional[str]:
         """
-        Prepare image for Gemini (camera only, depth info in text prompt).
+        Prepare image for Gemini.
 
         Args:
-            left_frame: Left camera frame (BGR).
-            depth_colored: Colored depth visualization (unused, depth in prompt).
+            left_frame: Left camera frame (BGR), typically with annotations.
+            depth_colored: Colored depth visualization (heatmap).
+            include_depth: Whether to stack depth heatmap below the frame.
 
         Returns:
             Base64-encoded JPEG, or None on error.
         """
         try:
-            # Send only camera image (depth info already in text prompt)
+            # Start with the annotated frame
             image = left_frame
+
+            # Optionally stack depth heatmap below
+            if include_depth and depth_colored is not None:
+                # Resize depth to match frame width
+                frame_h, frame_w = image.shape[:2]
+                depth_h, depth_w = depth_colored.shape[:2]
+
+                if depth_w != frame_w:
+                    scale = frame_w / depth_w
+                    new_depth_h = int(depth_h * scale)
+                    depth_resized = cv2.resize(depth_colored, (frame_w, new_depth_h))
+                else:
+                    depth_resized = depth_colored
+
+                # Stack vertically: [annotated frame, depth heatmap]
+                image = np.vstack((image, depth_resized))
 
             # Resize for API (max 384px height to reduce latency)
             h, w = image.shape[:2]
@@ -831,6 +1044,23 @@ GUIDELINES:
         """
         return self.client.generate_text_with_retry(prompt)
 
+    def _call_gemini_with_image(
+        self,
+        prompt: str,
+        image_base64: str
+    ) -> Tuple[Optional[str], float]:
+        """
+        Call Gemini API with text and image (runs in background thread).
+
+        Args:
+            prompt: Text prompt.
+            image_base64: Base64-encoded image.
+
+        Returns:
+            Tuple of (response text, elapsed_ms).
+        """
+        return self.client.analyze_image_with_timing(image_base64, prompt)
+
     def _print_response(
         self,
         trigger: Optional[TriggerInfo],
@@ -851,6 +1081,9 @@ GUIDELINES:
             speed_str = f" {trigger.speed:.1f}m/s" if trigger.speed else ""
             trigger_label = f"WARNING - {trigger.object_name} approaching{speed_str}"
             icon = "\u26A0\uFE0F"  # warning sign
+        elif trigger.trigger_type == TriggerType.USER_REQUEST:
+            trigger_label = "USER QUERY"
+            icon = "\U0001F3A4"  # microphone
         else:
             trigger_label = "ROUTINE"
             icon = "\U0001F7E2"  # green circle
@@ -868,6 +1101,7 @@ GUIDELINES:
             # Store abbreviated response in history (just the ACTION line if present)
             lines = response.strip().split('\n')
             summary = ""
+            action = ""
             for line in lines:
                 if line.startswith('ACTION:'):
                     action = line.replace('ACTION:', '').strip()
@@ -877,6 +1111,10 @@ GUIDELINES:
             if not summary:
                 summary = f"{trigger_label}"
             self.situation_history.append(summary)
+
+            # Speak action aloud if voice interface available (skip "continue" etc.)
+            if action and self.voice_interface and action.lower() not in ['continue', 'none', '']:
+                self.voice_interface.speak(action)
         else:
             print(f"\n{icon} [{trigger_label}] {timing_str}: No response")
 

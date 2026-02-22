@@ -24,6 +24,7 @@ from src.camera.display import VideoDisplay
 from src.calibration import StereoCalibrator, DepthEstimator, CalibrationError
 from src.odometry import VisualOdometry, WorldState
 from src.gemini.navigator import GeminiNavigator
+from src.voice import VoiceInterface, GeminiVoiceInterface, GEMINI_VOICE_AVAILABLE
 
 
 def parse_args():
@@ -103,6 +104,7 @@ class ReSeeApp:
         self.visual_odometry: Optional[VisualOdometry] = None
         self.world_state: Optional[WorldState] = None
         self.navigator: Optional[GeminiNavigator] = None
+        self.voice_interface: Optional[VoiceInterface] = None
 
         # Timing
         self.fps_controller: Optional[FPSController] = None
@@ -114,6 +116,7 @@ class ReSeeApp:
         self.detection_enabled = False
         self.odometry_enabled = False
         self.navigation_enabled = False
+        self.voice_enabled = False
 
     def setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
@@ -192,6 +195,10 @@ class ReSeeApp:
 
             # Initialize navigation assistant if available
             self._initialize_navigation()
+
+            # Initialize voice interface if navigation is enabled
+            if self.navigation_enabled:
+                self._initialize_voice()
 
             self.logger.info("All components initialized successfully")
             return True
@@ -359,7 +366,8 @@ class ReSeeApp:
                 api_key=api_key,
                 routine_interval=1.0,
                 danger_zone_m=5.0,
-                closing_speed_threshold=0.5
+                closing_speed_threshold=0.5,
+                enable_routine=False  # Disable heartbeat, only trigger on danger or voice
             )
             self.navigation_enabled = True
             self.logger.info("Gemini navigation enabled")
@@ -367,6 +375,154 @@ class ReSeeApp:
         except Exception as e:
             self.logger.error(f"Failed to initialize navigation: {e}")
             return False
+
+    def _initialize_voice(self) -> bool:
+        """
+        Initialize voice interface for TTS and speech recognition.
+
+        Prefers Gemini Live API for better STT/TTS, falls back to Whisper.
+
+        Returns:
+            True if voice is ready, False otherwise.
+        """
+        # Try Gemini voice first (better quality)
+        if GEMINI_VOICE_AVAILABLE and os.environ.get('GEMINI_API_KEY'):
+            try:
+                self.voice_interface = GeminiVoiceInterface()
+                self.voice_interface.start()
+
+                if self.navigator:
+                    self.navigator.set_voice_interface(self.voice_interface)
+
+                self.voice_enabled = True
+                self.logger.info("Gemini voice interface enabled (say 'Resee' to speak)")
+                return True
+            except Exception as e:
+                self.logger.warning(f"Gemini voice failed, trying fallback: {e}")
+
+        # Fallback to Whisper-based voice interface
+        try:
+            self.voice_interface = VoiceInterface()
+            self.voice_interface.start()
+
+            if self.navigator:
+                self.navigator.set_voice_interface(self.voice_interface)
+
+            self.voice_enabled = True
+            self.logger.info("Voice interface enabled (say 'Resee' to speak)")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Voice interface not available: {e}")
+            return False
+
+    def _create_voice_bottom_panel(self, width: int) -> np.ndarray:
+        """
+        Create voice monitor panel for bottom of screen.
+
+        Args:
+            width: Width of the panel (full screen width).
+
+        Returns:
+            Voice panel as numpy array.
+        """
+        # Fixed height - voice panel at bottom
+        panel_h = 400
+        panel = np.zeros((panel_h, width, 3), dtype=np.uint8)
+        panel[:] = (25, 25, 25)
+
+        if not self.voice_interface:
+            cv2.putText(panel, "Voice interface not available", (50, 200),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 100), 2)
+            return panel
+
+        margin = 30
+        bar_height = 60
+
+        # Title
+        cv2.putText(panel, "VOICE INTERFACE", (margin, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+
+        # Status indicator (large circle)
+        indicator_x = width - margin - 30
+        indicator_color = (0, 255, 0) if self.voice_interface.is_listening else (80, 80, 80)
+        cv2.circle(panel, (indicator_x, 35), 20, indicator_color, -1)
+        status_text = "LISTENING" if self.voice_interface.is_listening else "IDLE"
+        cv2.putText(panel, status_text, (indicator_x - 80, 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, indicator_color, 1)
+
+        # Row 1: Audio level bar (large)
+        y1 = 70
+        label_w = 180
+        cv2.putText(panel, "AUDIO LEVEL", (margin, y1 + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 150), 2)
+
+        bar_x = margin + label_w
+        bar_w = width - bar_x - margin
+        cv2.rectangle(panel, (bar_x, y1), (bar_x + bar_w, y1 + bar_height), (50, 50, 50), -1)
+
+        # Audio energy is now 0-1 normalized from the monitor thread
+        energy = min(1.0, self.voice_interface.audio_energy)
+        fill_w = int(energy * bar_w)
+        if fill_w > 0:
+            # Color gradient: green -> yellow -> red based on level
+            if energy < 0.3:
+                color = (0, 180, 0)
+            elif energy < 0.6:
+                color = (0, 255, 100)
+            elif energy < 0.8:
+                color = (0, 255, 255)
+            else:
+                color = (0, 100, 255)
+            cv2.rectangle(panel, (bar_x, y1), (bar_x + fill_w, y1 + bar_height), color, -1)
+
+        cv2.rectangle(panel, (bar_x, y1), (bar_x + bar_w, y1 + bar_height), (80, 80, 80), 2)
+
+        # Energy value text
+        energy_pct = int(energy * 100)
+        cv2.putText(panel, f"{energy_pct}%", (bar_x + bar_w + 10, y1 + 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 150), 2)
+
+        # Row 2: Transcription area (larger)
+        y2 = 160
+        cv2.putText(panel, "TRANSCRIPT", (margin, y2 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 150), 2)
+
+        transcript_h = 80
+        cv2.rectangle(panel, (bar_x, y2), (bar_x + bar_w, y2 + transcript_h), (40, 40, 40), -1)
+
+        # Show transcription text (larger)
+        text = self.voice_interface.last_heard if self.voice_interface.last_heard else "Say 'Resee' to ask a question..."
+        text_color = (100, 255, 100) if self.voice_interface.last_heard else (100, 100, 100)
+        cv2.putText(panel, text[:60], (bar_x + 15, y2 + 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2)
+        if len(text) > 60:
+            cv2.putText(panel, text[60:120], (bar_x + 15, y2 + 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2)
+
+        cv2.rectangle(panel, (bar_x, y2), (bar_x + bar_w, y2 + transcript_h), (80, 80, 80), 2)
+
+        # Row 3: Status message
+        y3 = 270
+        cv2.putText(panel, "STATUS", (margin, y3 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 150), 2)
+
+        status_h = 50
+        cv2.rectangle(panel, (bar_x, y3), (bar_x + bar_w, y3 + status_h), (35, 35, 35), -1)
+
+        status = self.voice_interface.status
+        cv2.putText(panel, status, (bar_x + 15, y3 + 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+
+        cv2.rectangle(panel, (bar_x, y3), (bar_x + bar_w, y3 + status_h), (80, 80, 80), 2)
+
+        # Row 4: Instructions
+        y4 = 350
+        cv2.putText(panel, "Say 'Resee' followed by your question, or press 'V' for push-to-talk",
+                    (margin, y4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 120, 120), 1)
+        cv2.putText(panel, f"Threshold: {self.voice_interface.energy_threshold:.0f}",
+                    (width - 200, y4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+
+        return panel
 
     def run_viewer(self) -> None:
         """Main camera viewing loop."""
@@ -389,6 +545,10 @@ class ReSeeApp:
             self.logger.info("Navigation assistant: ENABLED")
         else:
             self.logger.info("Navigation assistant: DISABLED")
+        if self.voice_enabled:
+            self.logger.info("Voice interface: ENABLED (say 'Resee' to ask)")
+        else:
+            self.logger.info("Voice interface: DISABLED")
         self.logger.info("Press Ctrl+C or ESC to stop")
         if self.odometry_enabled:
             self.logger.info("Press 'R' to reset odometry")
@@ -487,7 +647,7 @@ class ReSeeApp:
                     else:
                         left_panel = stereo_combined
 
-                    # Add bird's eye view NEXT TO the camera feeds (on the right)
+                    # Add bird's eye view on the right
                     if self.birdseye_view:
                         # Get camera pose and trajectory if odometry enabled
                         camera_pose = None
@@ -504,19 +664,21 @@ class ReSeeApp:
                             trajectory=trajectory
                         )
 
-                        # Scale bird's eye view to match left panel HEIGHT (makes it bigger)
+                        # Scale bird's eye view to match left panel HEIGHT
                         left_height = left_panel.shape[0]
                         bev_scale = left_height / birdseye_frame.shape[0]
                         bev_width = int(birdseye_frame.shape[1] * bev_scale)
-                        birdseye_resized = cv2.resize(
-                            birdseye_frame,
-                            (bev_width, left_height)
-                        )
+                        birdseye_resized = cv2.resize(birdseye_frame, (bev_width, left_height))
 
-                        # Combine horizontally: [cameras+depth | bird's eye]
+                        # Combine horizontally
                         combined_frame = np.hstack((left_panel, birdseye_resized))
                     else:
                         combined_frame = left_panel
+
+                    # Add voice panel at bottom (full width)
+                    if self.voice_enabled and self.voice_interface:
+                        voice_panel = self._create_voice_bottom_panel(combined_frame.shape[1])
+                        combined_frame = np.vstack((combined_frame, voice_panel))
 
                     # Create status
                     elapsed = time.time() - start_time
@@ -542,6 +704,11 @@ class ReSeeApp:
                             self.visual_odometry.reset()
                             self.world_state.reset()
                             self.logger.info("Visual odometry reset to origin")
+                    elif key == ord('v') or key == ord('V'):
+                        # Push-to-talk: listen for voice query
+                        if self.voice_enabled and self.voice_interface:
+                            self.voice_interface.listen_async()
+                            self.logger.info("Listening for voice query...")
 
                 # Log progress every 100 frames
                 if frame_count % 100 == 0:
@@ -573,6 +740,10 @@ class ReSeeApp:
     def cleanup(self) -> None:
         """Cleanup all resources."""
         self.logger.info("Cleaning up resources...")
+
+        # Shutdown voice interface
+        if self.voice_interface:
+            self.voice_interface.shutdown()
 
         # Shutdown navigator
         if self.navigator:

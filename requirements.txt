@@ -12,6 +12,7 @@ coremltools>=7.0
 # Voice interaction
 SpeechRecognition>=3.10.0
 pyaudio>=0.2.14
+openai-whisper>=20231117  # Much better accuracy than Google Speech API
 
 # Optional: Export YOLO to CoreML (one-time, run scripts/export_coreml.py)
 # ultralytics>=8.0.0

@@ -81,7 +81,7 @@ class GeminiClient:
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_text(prompt),
+                        types.Part.from_text(text=prompt),
                         image_blob
                     ]
                 )
@@ -187,6 +187,46 @@ class GeminiClient:
         for attempt in range(self.max_retries):
             try:
                 result = self.generate_text(prompt)
+                elapsed_ms = (time.time() - start_time) * 1000
+
+                if result:
+                    return result, elapsed_ms
+
+                logger.warning(f"Attempt {attempt + 1}/{self.max_retries} returned empty result")
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{self.max_retries} failed: {e}")
+
+                if attempt < self.max_retries - 1:
+                    logger.info("Retrying...")
+                    continue
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        return None, elapsed_ms
+
+    def analyze_image_with_timing(
+        self,
+        image_base64: str,
+        prompt: str,
+        mime_type: str = "image/jpeg"
+    ) -> Tuple[Optional[str], float]:
+        """
+        Analyze image with timing info and retry on failure.
+
+        Args:
+            image_base64: Base64-encoded image data.
+            prompt: Text prompt for analysis.
+            mime_type: MIME type of image.
+
+        Returns:
+            Tuple of (response text, elapsed_ms).
+        """
+        import time
+        start_time = time.time()
+
+        for attempt in range(self.max_retries):
+            try:
+                result = self.analyze_image(image_base64, prompt, mime_type)
                 elapsed_ms = (time.time() - start_time) * 1000
 
                 if result:
