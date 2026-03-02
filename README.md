@@ -1,6 +1,6 @@
 # ReSee - Stereo Camera + Gemini Live API Integration
 
-Real-time multimodal AI system that streams stereo video and audio from an ELP camera to Google's Gemini Live API for intelligent scene analysis.
+Real-time multimodal AI system that streams stereo video and audio from an ELP camera to Google's Gemini Live API for intelligent scene analysis. This project was built for Hack Europe Dublin, see also [Devpost][https://devpost.com/software/resee?ref_content=user-portfolio&ref_feature=in_progress]
 
 ## Features
 
